@@ -1,0 +1,1 @@
+# COSMAX eBiz Automation Module

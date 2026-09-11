@@ -1,0 +1,100 @@
+# ==============================================================================
+# Python
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==============================================================================
+# 가상환경 (Virtual Environments)
+# ==============================================================================
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==============================================================================
+# 실행 결과물 및 로그 (Logs & Reports)
+# ==============================================================================
+logs/
+log/
+logs/**
+log/**
+*.log
+screenshots/
+*.png
+*.html
+!README.md
+
+# ==============================================================================
+# 민감 정보 및 개인 설정 (Secrets & Environment Variables)
+# ==============================================================================
+config.json
+!config.example.json
+.env
+.env.local
+.env.*.local
+config.local.json
+credentials.json
+
+# ==============================================================================
+# 브라우저 자동화 임시 파일 (Playwright & Scraping)
+# ==============================================================================
+.playwright/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# ==============================================================================
+# 운영체제 생성 파일 (OS Generated Files)
+# ==============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+
+# ==============================================================================
+# IDE 및 편집기 설정 (IDEs & Editors)
+# ==============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project

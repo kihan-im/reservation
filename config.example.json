@@ -1,0 +1,19 @@
+{
+  "url": "https://ebiz.cosmax.com/login/loginForm.do",
+  "reservation_url": "https://ebiz.cosmax.com/inreservationReg/inreservationRegListNew.do?gblCompid=1200&TMENU=M00003&LMENU=M00084",
+  "user_id": "YOUR_COSMAX_ID",
+  "user_pw": "YOUR_COSMAX_PASSWORD",
+  "target_hours": [13, 14, 15],
+  "target_time": "10:00:00",
+  "keep_alive_interval_seconds": 30,
+  "grid_max_retries": 5,
+  "grid_retry_delay_seconds": 0.3,
+  "max_pre_target_retries": 5,
+  "pre_target_retry_delay_seconds": 5,
+  "screenshot_dir": "screenshots",
+  "log_dir": "logs",
+  "headless": false,
+  "skip_weekends": true,
+  "skip_holidays": true,
+  "custom_holidays": []
+}
