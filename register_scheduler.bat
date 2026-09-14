@@ -1,4 +1,7 @@
 @echo off
+REM Windows 시스템 기본 경로(System32) 강제 확보 (환경변수 PATH 누락 방지)
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0\;%PATH%"
+
 chcp 65001 > nul
 title COSMAX 작업 스케줄러 등록 마법사
 
@@ -8,7 +11,7 @@ echo =======================================================
 echo.
 
 REM 1. 관리자 권한 확인
-net session >nul 2>&1
+"%SystemRoot%\System32\net.exe" session >nul 2>&1
 if %errorlevel% neq 0 (
     echo [오류] 관리자 권한이 필요합니다.
     echo 이 배치 파일을 마우스 우클릭한 후 [관리자 권한으로 실행]을 선택해 주세요.
@@ -22,18 +25,18 @@ set SCRIPT_PATH=%~dp0run_automation.bat
 set TASK_NAME=CosmaxAutoReservation
 
 echo [1/2] 기존 동일 스케줄러 작업 확인 및 정리...
-schtasks /query /tn "%TASK_NAME%" >nul 2>&1
+"%SystemRoot%\System32\schtasks.exe" /query /tn "%TASK_NAME%" >nul 2>&1
 if %errorlevel% equ 0 (
     echo 기존에 등록된 %TASK_NAME% 작업을 갱신합니다.
-    schtasks /delete /tn "%TASK_NAME%" /f >nul 2>&1
+    "%SystemRoot%\System32\schtasks.exe" /delete /tn "%TASK_NAME%" /f >nul 2>&1
 )
 
 echo [2/2] 매주 평일(월~금) 오전 09:50 자동 실행 작업 등록 중...
-schtasks /create /tn "%TASK_NAME%" /tr "\"%SCRIPT_PATH%\" --headless --no-pause" /sc weekly /d MON,TUE,WED,THU,FRI /st 09:50 /ru "%USERNAME%" /it /f
+"%SystemRoot%\System32\schtasks.exe" /create /tn "%TASK_NAME%" /tr "\"%SCRIPT_PATH%\" --headless --no-pause" /sc weekly /d MON,TUE,WED,THU,FRI /st 09:50 /ru "%USERNAME%" /it /f
 
 if %errorlevel% equ 0 (
     echo [설정] 대화형 콘솔 표시 및 무인 자동 복구 고급 설정 적용 중...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive; $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -WakeToRun -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; Set-ScheduledTask -TaskName '%TASK_NAME%' -Principal $principal -Settings $settings -ErrorAction SilentlyContinue" >nul 2>&1
+    "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive; $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -WakeToRun -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; Set-ScheduledTask -TaskName '%TASK_NAME%' -Principal $principal -Settings $settings -ErrorAction SilentlyContinue" >nul 2>&1
 
     echo.
     echo =======================================================

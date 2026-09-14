@@ -1,4 +1,7 @@
 @echo off
+REM Windows 시스템 기본 경로(System32) 강제 확보 (환경변수 PATH 누락 방지)
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0\;%PATH%"
+
 chcp 65001 > nul
 title COSMAX eBiz Auto Login & Session Keeper
 
