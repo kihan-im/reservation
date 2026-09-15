@@ -57,6 +57,22 @@ venv/bin/python main.py --check-config
 
 점검 후 실제 예약 실행은 `./run_automation.sh --headful`입니다. 화면 없이 실행하려면 `./run_automation.sh --headless`를 사용합니다. Windows BAT 메뉴와 PowerShell 스케줄러는 이 환경에서 사용하지 않습니다.
 
+## 영상 녹화 (선택)
+
+녹화는 기본으로 꺼져 있습니다. 이번 실행만 녹화하려면 다음 명령을 사용합니다.
+
+```bat
+run_automation.bat --headful --record-video
+```
+
+저장 없는 13시 점검은 `run_automation.bat --headful --record-video --force --dry-run --hours 13`입니다. macOS/Linux에서는 `./run_automation.sh --headful --record-video`를 사용합니다.
+
+메뉴 4·5번에서도 녹화하려면 `config.json`에 `"record_video": true`를 설정합니다. **`headless=false`일 때만 녹화하며, `headless=true`에서는 옵션이 켜져 있어도 녹화하지 않습니다.** 메뉴 6번의 자동 실행도 headless이므로 녹화하지 않습니다. `--no-record-video`로 이번 실행만 끌 수 있습니다.
+
+영상은 각 탭을 연 시점부터 브라우저 종료까지(로그인·목표 시각 대기 포함) 무음 WebM으로 기록합니다. 종료 후 `log/날짜/13/video_실행시각_attempt1_13.webm`처럼 시간대별 폴더에 저장하며, 같은 폴더의 HTML에서 재생하거나 내려받을 수 있습니다. [Playwright 영상 녹화](https://playwright.dev/python/docs/videos)를 사용하므로 별도 패키지는 필요하지 않습니다.
+
+영상에는 사이트 화면이 담기며, 브라우저 주소 표시줄·탭·기본 `alert/confirm` 팝업은 포함되지 않습니다. 기본 팝업은 기존 Windows PNG 캡처와 문구 로그로 확인합니다. 사이트 내부 안내창은 영상에 포함됩니다. 브라우저를 정상 종료해야 파일이 완성되며, 강제 종료 시 불완전한 영상이나 임시 이름의 파일이 남을 수 있습니다.
+
 ## 실행과 결과
 
 1. 설정과 휴일을 검사하고 한 번 로그인한 세션으로 시간대별 탭을 준비합니다.
@@ -86,11 +102,12 @@ log/
       automation_YYYYMMDD_HHMMSS_ffffff.log
       automation_YYYYMMDD_HHMMSS_ffffff.html
       reservation_YYYYMMDD_HHMMSS_ffffff_attempt1_13_03_....png
+      video_YYYYMMDD_HHMMSS_ffffff_attempt1_13.webm  # 녹화 시에만 생성
     14/                           # 같은 형식
     15/                           # 같은 형식
 ```
 
-각 시간대 폴더에 로그·HTML·이미지만 저장합니다. 실행 시각과 재시도 번호는 파일명으로 구분하며, 실행별 하위 폴더나 별도 `result.json`은 만들지 않습니다. `[RESULT]`는 해당 시간대 결과, `[COMPLETE]`는 전체 실행 상태와 종료 코드입니다. 공통 로그인·준비 로그는 각 시간대 로그에 함께 들어갑니다.
+각 시간대 폴더에 로그·HTML·이미지와 선택적으로 녹화한 영상을 저장합니다. 실행 시각과 재시도 번호는 파일명으로 구분하며, 실행별 하위 폴더나 별도 `result.json`은 만들지 않습니다. `[RESULT]`는 해당 시간대 결과, `[COMPLETE]`는 전체 실행 상태와 종료 코드입니다. 공통 로그인·준비 로그는 각 시간대 로그에 함께 들어갑니다.
 
 로그는 실행 중 파일에 지속 기록하고 종료 시 각 HTML을 만듭니다. HTML과 이미지를 같은 폴더에 보관하면 썸네일을 열 수 있습니다. 사이트 내부 완료 안내는 `*_08_save_notice.png`, Windows 화면 표시 모드의 브라우저 기본 팝업은 `*_browser_dialog_*.png`로 남깁니다. headless 및 Windows 외 환경의 브라우저 기본 팝업은 문구만 기록합니다. 기존 파일은 덮어쓰거나 자동 삭제하지 않습니다.
 
@@ -118,6 +135,7 @@ log/
   "target_time": "10:00:00",
   "keep_alive_interval_seconds": 30,
   "headless": false,
+  "record_video": false,
   "skip_weekends": true,
   "skip_holidays": true,
   "custom_holidays": [],

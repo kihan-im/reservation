@@ -79,3 +79,11 @@ venv\Scripts\python.exe -m pip check
 macOS/Linux에서는 위 Python 경로를 `venv/bin/python`으로 바꿉니다.
 
 브라우저 검사는 외부 예약을 만들지 않는 로컬 모의 페이지를 사용합니다. Windows BAT 검사는 임시 폴더의 대체 프로그램으로 인수 전달·종료 코드·무인 실행 오류 처리를 확인하며, Windows 외 환경에서는 건너뜁니다. 이 검사는 실제 작업 스케줄러를 등록하지 않습니다. 테스트 통과만으로 실제 사이트의 성공 예약이나 Windows 정기 실행까지 검증된 것은 아닙니다.
+
+## 녹화 영상이 없거나 팝업이 보이지 않음
+
+- 녹화 기본값은 꺼짐입니다. `--headful --record-video` 또는 `headless=false`, `record_video=true` 설정이 필요합니다. `--no-record-video`가 있으면 녹화하지 않습니다.
+- `headless=true`에서는 요청 여부와 관계없이 녹화하지 않습니다. 메뉴 6번으로 등록한 스케줄러가 여기에 해당합니다.
+- 실행이 끝난 뒤 `log/날짜/시간대/video_*.webm`과 `동영상 저장` 로그를 확인합니다. 종료 전에는 임시 파일명이며, 강제 종료하면 완성되지 않을 수 있습니다. `동영상 저장 실패` 또는 `녹화 마무리 실패` 경고도 확인하세요.
+- 브라우저 기본 `alert/confirm`은 사이트 화면 영상에 포함되지 않습니다. Windows 화면 표시 모드의 `*_browser_dialog_*.png`와 팝업 문구 로그를 확인합니다.
+- FFmpeg 실행 파일을 찾을 수 없다는 오류라면 메뉴 1번 또는 `venv\Scripts\python.exe -m playwright install chromium`으로 Playwright 브라우저 구성 요소를 복구합니다.

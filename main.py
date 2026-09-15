@@ -43,6 +43,8 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--headless", action="store_true")
     mode.add_argument("--headful", action="store_true")
+    parser.add_argument("--record-video", action=argparse.BooleanOptionalAction, default=None,
+                        help="화면 표시 모드에서 영상 녹화. headless에서는 항상 생략")
     parser.add_argument("--force", action="store_true", help="주말/공휴일 검사만 생략")
     parser.add_argument("--no-pause", action="store_true", help="Windows 배치 무인 실행")
     parser.add_argument("--dry-run", action="store_true", help="목표 시각 대기 및 최종 저장 없이 준비 과정 점검")
@@ -56,6 +58,8 @@ def main():
             config["log_dir"] = "log"
         if args.headless or args.headful:
             config["headless"] = args.headless
+        if args.record_video is not None:
+            config["record_video"] = args.record_video
         if args.hours is not None:
             config["target_hours"] = args.hours
         config["dry_run"] = args.dry_run or config["dry_run"]

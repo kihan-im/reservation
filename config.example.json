@@ -14,6 +14,7 @@
   "pre_target_retry_delay_seconds": 5,
   "log_dir": "log",
   "headless": false,
+  "record_video": false,
   "viewport_width": 2200,
   "viewport_height": 1080,
   "grid_wait_timeout_seconds": 5.0,

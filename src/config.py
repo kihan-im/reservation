@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "keep_alive_interval_seconds": 30,
     "log_dir": "log",
     "headless": False,
+    "record_video": False,
     "viewport_width": 2200,
     "viewport_height": 1080,
     "grid_wait_timeout_seconds": 5.0,
@@ -54,7 +55,7 @@ def validate_config(config: dict) -> dict:
     for key in ("viewport_width", "viewport_height", "max_pre_target_retries"):
         if type(config[key]) is not int or config[key] < 0:
             raise ValueError(f"{key}는 음수가 아닌 정수여야 합니다.")
-    for key in ("headless", "dry_run", "skip_weekends", "skip_holidays", "clean_daily_logs"):
+    for key in ("headless", "record_video", "dry_run", "skip_weekends", "skip_holidays", "clean_daily_logs"):
         if type(config[key]) is not bool:
             raise ValueError(f"{key}는 true 또는 false여야 합니다.")
     for key in ("url", "reservation_url", "log_dir"):

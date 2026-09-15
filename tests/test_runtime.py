@@ -20,7 +20,7 @@ class RuntimeTest(unittest.TestCase):
     def test_invalid_config_fails_closed(self):
         for key, value in [('target_time','25:00:00'), ('target_hours',[]), ('target_hours',[13,13]),
                            ('target_hours',[12]), ('grid_wait_timeout_seconds',-1),
-                           ('keep_alive_timeout_seconds',float('nan')), ('headless','false'),
+                           ('keep_alive_timeout_seconds',float('nan')), ('headless','false'), ('record_video','true'),
                            ('max_pre_target_retries',1.5), ('custom_holidays',['2026-02-30'])]:
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 validate_config(dict(DEFAULT_CONFIG, **{key:value}))
@@ -59,6 +59,7 @@ class RuntimeTest(unittest.TestCase):
             log.info('[13시 탭] only thirteen')
             log.info('[14시 탭] only fourteen')
             log.info(r'[13시 탭] 스크린샷 저장: C:\Users\Test User\log\20260915\13\capture.png')
+            log.info(r'[13시 탭] 동영상 저장: C:\Users\Test User\log\20260915\13\video test.webm')
             log.info('[COMPLETE] PARTIAL_OR_REVIEW')
             flush_logger_to_disk(log)
             for hour, path in first_paths.items():
@@ -72,6 +73,9 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual('only fourteen' in report, hour == 14)
                 if hour == 13:
                     self.assertIn('src="capture.png"', report)
+                    self.assertIn('<video controls preload="none" src="video test.webm"', report)
+                else:
+                    self.assertNotIn('<video ', report)
             first = Path(first_paths[13])
             next_log = setup_logger(folder, [13], clean_existing=True)
             flush_logger_to_disk(next_log)

@@ -7,6 +7,7 @@ import os
 import sys
 import asyncio
 import logging
+from pathlib import Path
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, parse_qs
@@ -70,6 +71,20 @@ class CosmaxAutomation:
         path = await self.save_stage_screenshot(page, hour, 10, "final")
         self.has_captured_screenshot = bool(path) or self.has_captured_screenshot
         return path
+
+    async def save_recorded_videos(self, tabs):
+        """컨텍스트 종료로 녹화가 끝난 뒤 시간대별 파일명으로 옮긴다."""
+        for hour, page in tabs:
+            if page.video is None:
+                continue
+            try:
+                source = Path(await page.video.path())
+                target = Path(self.get_tab_output_dir(hour)) / (
+                    f"video_{self.run_id}_attempt{self.config.get('attempt', 1)}_{hour:02d}.webm")
+                source.replace(target)
+                self.logger.info(f"🎥 [{hour}시 탭] 동영상 저장: {target}")
+            except Exception as error:
+                self.logger.warning(f"[{hour}시 탭] 동영상 저장 실패: {error}")
 
     async def save_stage_screenshot(self, page, hour: int, stage: int, name: str) -> str:
         """현재 뷰포트를 캡처한다. 전체 페이지 캡처는 사이트의 resize 핸들러로 팝업 순서를 바꾼다."""
@@ -618,18 +633,28 @@ async def execute_automation(config: dict, logger: logging.Logger):
 
     async with async_playwright() as p:
         browser = None
+        context = None
         tabs = []  # [(hour, page), ...]
+        record_video = config.get('record_video', False) and not config.get('headless', False)
 
         try:
             # 1. 브라우저 및 컨텍스트 생성 (세션 쿠키 공유)
             browser = await automation.launch_browser(p)
             vp_w = config.get("viewport_width", 2200)
             vp_h = config.get("viewport_height", 1080)
-            context = await browser.new_context(
+            context_options = dict(
                 viewport={"width": vp_w, "height": vp_h} if config.get("headless", False) else None,
                 no_viewport=not config.get("headless", False),
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
+            if record_video:
+                # 종료 시 각 탭의 파일을 해당 시간대 폴더로 옮긴다.
+                context_options.update(record_video_dir=automation.get_tab_output_dir(target_hours[0]),
+                                       record_video_size={"width": 1920, "height": 1080})
+                logger.info("동영상 녹화 활성화: 사이트 화면을 시간대별로 기록합니다.")
+            elif config.get('record_video'):
+                logger.info("headless=true이므로 동영상 녹화를 생략합니다.")
+            context = await browser.new_context(**context_options)
 
             # 리소스 차단 (웹폰트 및 불필요 미디어 차단으로 탭 3개 로딩 및 메모리 최적화)
             async def route_filter(route):
@@ -655,8 +680,8 @@ async def execute_automation(config: dict, logger: logging.Logger):
             # 3. 추가 시간대(14시, 15시 등)를 위한 병렬 탭 동시 생성 (동일 context 내 세션 공유)
             for hr in target_hours[1:]:
                 tab_page = await context.new_page()
-                await automation.set_maximized(context, tab_page)
                 tabs.append((hr, tab_page))
+                await automation.set_maximized(context, tab_page)
 
             # 4. 각 탭 사전 준비 (예약 페이지 이동 + [지류]청북2층 선택 + dialog 자동 승인)
             logger.info("======================================================================")
@@ -725,6 +750,14 @@ async def execute_automation(config: dict, logger: logging.Logger):
                 return [dict(hour=hr, status="UNKNOWN", detail=str(exc)) for hr in target_hours]
             raise
         finally:
+            if context:
+                try:
+                    # 녹화 파일은 context.close()를 기다려야 완성된다.
+                    await context.close()
+                    if record_video:
+                        await automation.save_recorded_videos(tabs)
+                except Exception as error:
+                    logger.warning(f"브라우저 컨텍스트 종료/녹화 마무리 실패: {error}")
             if browser:
                 try:
                     await browser.close()

@@ -100,6 +100,7 @@ def run_wizard():
     base_config.setdefault("grid_wait_timeout_seconds", 5)
     base_config.setdefault("keep_alive_timeout_seconds", 3)
     base_config.setdefault("dry_run", False)
+    base_config.setdefault("record_video", False)
     if "headless" not in base_config:
         base_config["headless"] = False
     if "skip_weekends" not in base_config:

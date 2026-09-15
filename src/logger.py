@@ -146,12 +146,16 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
         if is_step:
             step_count += 1
 
-        # 스크린샷 파일 경로 감지 (.png 파일 매칭)
+        # 같은 시간대 폴더의 이미지/영상 경로 (Windows 경로와 공백 지원).
         img_path = None
-        img_match = re.search(r"(?:[A-Za-z]:[\\/]|/)[^\r\n]*?\.png", message)
-        if img_match:
-            # 시간대 HTML과 이미지는 같은 폴더에 있다. Windows 경로와 공백도 지원한다.
-            img_path = img_match.group(0).replace("\\", "/").rsplit("/", 1)[-1]
+        video_path = None
+        media_match = re.search(r"(?:[A-Za-z]:[\\/]|/)[^\r\n]*?\.(png|webm)", message)
+        if media_match:
+            media_path = media_match.group(0).replace("\\", "/").rsplit("/", 1)[-1]
+            if media_match.group(1) == 'webm':
+                video_path = media_path
+            else:
+                img_path = media_path
 
         parsed_entries.append({
             "idx": idx,
@@ -159,7 +163,8 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
             "level": level,
             "message": message,
             "is_step": is_step,
-            "img_path": img_path
+            "img_path": img_path,
+            "video_path": video_path
         })
 
     today_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -475,6 +480,15 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
                     <img src="{escaped_img_path}" class="img-thumb" alt="캡처 스크린샷 미리보기" onclick="openModal('{escaped_img_path}'); return false;">
                 </a>
                 <div style="font-size: 11px; color: #64748b; margin-top: 5px;">📷 클릭하여 확대보기 ({escaped_img_path})</div>
+            </div>
+            """
+
+        if entry['video_path']:
+            escaped_video_path = html.escape(entry['video_path'])
+            img_html += f"""
+            <div class="img-preview-box">
+                <video controls preload="none" src="{escaped_video_path}" style="width: 640px; max-width: 100%;"></video>
+                <div><a href="{escaped_video_path}" download>영상 다운로드 ({escaped_video_path})</a></div>
             </div>
             """
 
