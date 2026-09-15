@@ -1,2 +1,8 @@
-playwright>=1.40.0
-holidays>=0.30
+# Python 3.13 로컬 검증 버전. 변경 시 Chromium 재설치 및 회귀 테스트 필요.
+playwright==1.62.0
+holidays==0.104
+greenlet==3.5.5
+pyee==13.0.1
+python-dateutil==2.9.0.post0
+six==1.17.0
+typing_extensions==4.16.0

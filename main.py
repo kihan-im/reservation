@@ -9,7 +9,6 @@ import os
 import sys
 import asyncio
 import argparse
-from datetime import date
 
 # 현재 디렉토리를 모듈 검색 경로 최상단에 추가
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,121 +28,98 @@ except ImportError:
         if os.path.exists(cand) and sys.executable != cand:
             os.execv(cand, [cand] + sys.argv)
 
-from datetime import datetime
-from src.config import load_config
+import json
+import time
+from src.config import load_config, validate_config
 from src.logger import setup_logger, flush_logger_to_disk, generate_html_log
 from src.holiday import check_is_weekend_or_holiday
 from src.browser import execute_automation
+from src.reservation_state import now_kst, outcome_exit_code
 
 
 def main():
-    start_time = datetime.now()
-    
-    parser = argparse.ArgumentParser(description="COSMAX eBiz Auto Login & Reservation Page Session Keeper")
-    parser.add_argument("--config", default="config.json", help="설정 파일 경로 (기본값: config.json)")
-    parser.add_argument("--headless", action="store_true", help="브라우저 화면을 띄우지 않고 백그라운드 실행")
-    parser.add_argument("--headful", action="store_true", help="브라우저 화면을 띄워서 실행")
-    parser.add_argument("--force", action="store_true", help="주말 및 공휴일 체크를 무시하고 강제 실행")
-    parser.add_argument("--no-pause", action="store_true", help="배치 파일/스케줄러 무인 실행 플래그")
+    parser = argparse.ArgumentParser(description="COSMAX eBiz 입고예약 자동화")
+    parser.add_argument("--config", default=os.path.join(BASE_DIR, "config.json"))
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--headless", action="store_true")
+    mode.add_argument("--headful", action="store_true")
+    parser.add_argument("--force", action="store_true", help="주말/공휴일 검사만 생략")
+    parser.add_argument("--no-pause", action="store_true", help="Windows 배치 무인 실행")
+    parser.add_argument("--dry-run", action="store_true", help="목표 시각 대기 및 최종 저장 없이 준비 과정 점검")
+    parser.add_argument("--check-config", action="store_true", help="브라우저 없이 설정 유효성 점검")
+    parser.add_argument("--hours", nargs="+", type=int, help="이번 실행에서 처리할 시간대")
+    parser.add_argument("--retry-unknown", action="store_true", help="서버에 미등록임을 직접 확인한 UNKNOWN 시간대 재시도")
     args = parser.parse_args()
-    
-    # 1. 설정 로드
-    config = load_config(args.config)
-    if args.headless:
-        config["headless"] = True
-    elif args.headful:
-        config["headless"] = False
-        
-    # 2. 로거 생성
-    logger = setup_logger(config.get("log_dir", "logs"))
-    log_file_path = getattr(logger, "log_file_path", None)
-    
-    mode_text = "Headless(백그라운드)" if config.get("headless", False) else "화면 표시(Headful)"
-    logger.info("======================================================================")
-    logger.info("🚀 [START] COSMAX eBiz 입고예약 자동화 시작")
-    logger.info(f"📅 시작 일시: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"⚙️ 실행 모드: {mode_text} | 목표 시각: {config.get('target_time', '10:00:00')}")
-    logger.info("======================================================================")
-    
-    exit_code = 0
-    fail_reason = ""
     try:
-        # 3. 주말 / 공휴일 예외 검사
-        today = date.today()
-        is_off, reason = check_is_weekend_or_holiday(today, config, logger, force=args.force)
-        
+        config = load_config(args.config)
+        if args.headless or args.headful:
+            config["headless"] = args.headless
+        if args.hours is not None:
+            config["target_hours"] = args.hours
+        config["dry_run"] = args.dry_run or config["dry_run"]
+        config["retry_unknown"] = args.retry_unknown
+        validate_config(config)
+        if not os.path.isabs(config["log_dir"]):
+            config["log_dir"] = os.path.join(os.path.dirname(os.path.abspath(args.config)), config["log_dir"])
+    except (ValueError, OSError, TypeError) as error:
+        print(f"[CONFIG ERROR] {error}", file=sys.stderr)
+        return 1
+    if args.check_config:
+        print("[CONFIG OK] 설정 검사 완료 (브라우저 실행/예약 없음)")
+        return 0
+
+    start = now_kst()
+    logger = setup_logger(config["log_dir"], config["target_hours"], config.get("clean_daily_logs", False))
+    log_path = logger.log_file_path
+    report_path = os.path.splitext(log_path)[0] + ".html"
+    status, exit_code, results = "FAILED", 1, []
+    logger.info(f"[START] {start.isoformat()} / 목표 {config['target_time']} KST / dry_run={config['dry_run']}")
+    try:
+        is_off, reason = check_is_weekend_or_holiday(start.date(), config, logger, force=args.force)
         if is_off:
-            logger.info("======================================================================")
-            logger.info(f"[SKIP] 오늘은 {reason} 입니다. 스크립트를 정상 종료합니다.")
-            logger.info("======================================================================")
-            return
-            
-        # 4. 자동화 워크플로우 실행 (10시 정각 이전 오류 감지 시 자동 복구/재시도 루프)
-        target_time_str = config.get("target_time", "10:00:00")
-        try:
-            target_time_parts = [int(p) for p in target_time_str.split(":")]
-            target_dt = datetime.combine(today, datetime.min.time()).replace(
-                hour=target_time_parts[0],
-                minute=target_time_parts[1],
-                second=target_time_parts[2]
-            )
-        except Exception:
-            target_dt = datetime.combine(today, datetime.min.time()).replace(hour=10, minute=0, second=0)
-
-        max_pre_target_retries = config.get("max_pre_target_retries", 5)
-        retry_delay_sec = config.get("pre_target_retry_delay_seconds", 5)
-        attempt = 0
-
-        while True:
-            attempt += 1
-            try:
-                asyncio.run(execute_automation(config, logger))
-                break  # 정상 완료 시 루프 탈출
-            except Exception as err:
-                curr_now = datetime.now()
-                remaining_sec = (target_dt - curr_now).total_seconds()
-                
-                # 목표 시각(10:00:00) 이전이고 최소 15초 이상 여유가 있으며 재시도 한도 내인 경우 자동 부활
-                if curr_now < target_dt and remaining_sec > 15 and attempt <= max_pre_target_retries:
-                    logger.warning("======================================================================")
-                    logger.warning(f"⚠️ [AUTO-HEAL] 목표 시각({target_time_str}) 이전 세션 오류 감지: {err}")
-                    logger.warning(f"🔄 남은 시간: {int(remaining_sec)}초 | {retry_delay_sec}초 후 브라우저 및 세션 자동 복구 ({attempt}/{max_pre_target_retries})...")
-                    logger.warning("======================================================================")
-                    import time
-                    time.sleep(retry_delay_sec)
-                    continue
-                else:
-                    # 목표 시각 이후이거나 시간이 촉박한 경우 예외 전파
-                    raise err
-
-    except Exception as err:
-        exit_code = 1
-        fail_reason = str(err)
-        logger.error(f"[FAILURE] 예약 자동화 작업 실패: {err}")
-
+            status, exit_code = "SKIPPED", 0
+            logger.info(f"[SKIP] {reason}")
+        else:
+            hour, minute, second = map(int, config['target_time'].split(':'))
+            target = start.replace(hour=hour, minute=minute, second=second, microsecond=0)
+            for attempt in range(config['max_pre_target_retries'] + 1):
+                try:
+                    config["attempt"] = attempt + 1
+                    results = asyncio.run(execute_automation(config, logger))
+                    break
+                except Exception as error:
+                    # execute_automation은 저장 시작 후 오류를 결과로 반환한다. 사전 준비만 재시도한다.
+                    remaining = (target - now_kst()).total_seconds()
+                    delay = config['pre_target_retry_delay_seconds']
+                    if config['dry_run'] or remaining <= delay + 15 or attempt >= config['max_pre_target_retries']:
+                        raise
+                    logger.warning(f"[AUTO-HEAL] 사전 준비 실패: {error}. {delay}초 후 재시도 {attempt+1}")
+                    time.sleep(delay)
+            exit_code = outcome_exit_code(results, config['dry_run'])
+            status = ("DRY_RUN" if config['dry_run'] else "CONFIRMED") if exit_code == 0 else (
+                "PARTIAL_OR_REVIEW" if exit_code == 2 else "FAILED")
+    except Exception as error:
+        logger.exception(f"[FAILURE] {error}")
     finally:
-        end_time = datetime.now()
-        elapsed_sec = (end_time - start_time).total_seconds()
-        
-        # 5. 메모리 버퍼 로그 디스크 플러시 및 정제된 HTML 디버깅 보고서 자동 생성
+        end = now_kst()
+        summary = dict(status=status, exit_code=exit_code, started_at=start.isoformat(),
+                       ended_at=end.isoformat(), dry_run=config['dry_run'], results=results)
+        try:
+            with open(os.path.join(os.path.dirname(log_path), "result.json"), "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
+        except OSError as error:
+            exit_code = 1
+            logger.error(f"결과 파일 저장 실패: {error}")
+        logger.info(f"[COMPLETE] {status} / 종료 코드 {exit_code} / 소요 {(end-start).total_seconds():.2f}초")
+        logger.info(f"보고서: {report_path}")
         flush_logger_to_disk(logger)
-        html_report_path = ""
-        if log_file_path:
-            html_report_path = generate_html_log(log_file_path)
-            
-        status_text = "✅ 성공" if exit_code == 0 else f"❌ 실패 ({fail_reason})"
-        logger.info("======================================================================")
-        logger.info(f"🏁 [COMPLETE] COSMAX eBiz 자동화 실행 완료 - {status_text}")
-        logger.info(f"📅 시작 일시: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"🏁 종료 일시: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"⏱️ 총 소요 시간: {elapsed_sec:.2f}초 ({int(elapsed_sec // 60)}분 {int(elapsed_sec % 60)}초)")
-        if html_report_path:
-            logger.info(f"📊 디버깅 리포트: {html_report_path}")
-        logger.info("======================================================================")
-
-    if exit_code != 0:
-        sys.exit(exit_code)
+        try:
+            generate_html_log(log_path)
+        except OSError as error:
+            print(f"HTML 보고서 생성 실패: {error}", file=sys.stderr)
+            exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

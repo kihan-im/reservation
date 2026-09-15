@@ -45,18 +45,6 @@ def check_is_weekend_or_holiday(today: date, config: dict, logger: logging.Logge
                 holiday_name = kr_holidays.get(today)
                 return True, f"대한민국 공휴일 ({holiday_name}, {date_str})"
         else:
-            fixed_holidays = {
-                "01-01": "신정",
-                "03-01": "삼일절",
-                "05-05": "어린이날",
-                "06-06": "현충일",
-                "08-15": "광복절",
-                "10-03": "개천절",
-                "10-09": "한글날",
-                "12-25": "성탄절"
-            }
-            md_str = today.strftime("%m-%d")
-            if md_str in fixed_holidays:
-                return True, f"법정 공휴일 ({fixed_holidays[md_str]}, {date_str})"
-                
+            raise RuntimeError("공휴일 확인에 필요한 holidays 패키지가 없습니다. requirements.txt를 설치하세요.")
+
     return False, ""

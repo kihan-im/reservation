@@ -97,10 +97,9 @@ def run_wizard():
         base_config["target_time"] = "10:00:00"
     if "keep_alive_interval_seconds" not in base_config:
         base_config["keep_alive_interval_seconds"] = 30
-    if "grid_max_retries" not in base_config:
-        base_config["grid_max_retries"] = 5
-    if "grid_retry_delay_seconds" not in base_config:
-        base_config["grid_retry_delay_seconds"] = 0.3
+    base_config.setdefault("grid_wait_timeout_seconds", 5)
+    base_config.setdefault("keep_alive_timeout_seconds", 3)
+    base_config.setdefault("dry_run", False)
     if "headless" not in base_config:
         base_config["headless"] = False
     if "skip_weekends" not in base_config:

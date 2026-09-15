@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-로거 생성, 메모리 버퍼링 및 일자별 디렉토리 분리/HTML 보고서 생성 모듈
-- 예약 실행 중 파일 I/O 지연을 방지하기 위해 메모리 버퍼링(MemoryLogHandler) 사용
-- 실행 완료 후 배치로 파일 기록 및 정제된 HTML 디버깅 보고서 생성
+실행별 큐 기반 파일 로깅 및 HTML 보고서 생성 모듈
 """
 
 import os
@@ -15,28 +13,14 @@ import logging
 from datetime import datetime
 
 
-class MemoryLogHandler(logging.Handler):
-    """실행 중 파일 쓰기 지연을 최소화하기 위한 메모리 버퍼 로깅 핸들러"""
-    def __init__(self, target_file_path: str):
+class TabLogFilter(logging.Filter):
+    """특정 시간대 탭의 로그만 통과시킨다."""
+    def __init__(self, hour: int):
         super().__init__()
-        self.target_file_path = target_file_path
-        self.buffer = []
+        self.tab_marker = f"[{hour}시 탭]"
 
-    def emit(self, record):
-        try:
-            msg = self.format(record)
-            self.buffer.append(msg)
-        except Exception:
-            self.handleError(record)
-
-    def flush_to_disk(self):
-        if not self.buffer:
-            return
-        os.makedirs(os.path.dirname(os.path.abspath(self.target_file_path)), exist_ok=True)
-        with open(self.target_file_path, "a", encoding="utf-8") as f:
-            for item in self.buffer:
-                f.write(item + "\n")
-        self.buffer.clear()
+    def filter(self, record):
+        return self.tab_marker in record.getMessage()
 
 
 import queue
@@ -63,58 +47,51 @@ def disable_windows_quick_edit():
             pass
 
 
-def setup_logger(log_dir="logs") -> logging.Logger:
-    """비동기 제로-블로킹 콘솔 및 메모리 버퍼 핸들러 설정"""
-    # 0. Windows 콘솔 클릭 시 프리징 방지
+def setup_logger(log_dir="logs", target_hours=None, clean_existing=False) -> logging.Logger:
+    """실행별 경로에 큐 기반 파일 로그를 지속 기록한다. 기존 기록은 삭제하지 않는다."""
     disable_windows_quick_edit()
-
-    today_str = datetime.now().strftime("%Y%m%d")
-    date_log_dir = os.path.join(log_dir, today_str)
-    os.makedirs(date_log_dir, exist_ok=True)
-    
-    log_file_path = os.path.join(date_log_dir, f"auto_login_{today_str}.log")
-    
+    now = datetime.now()
+    run_dir = os.path.join(log_dir, now.strftime("%Y%m%d"), now.strftime("%H%M%S_%f"))
+    os.makedirs(run_dir, exist_ok=False)
     logger = logging.getLogger("CosmaxAutoLogin")
-    logger.setLevel(logging.INFO)
+    flush_logger_to_disk(logger)
     logger.handlers.clear()
-    
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    
-    # 1. 비동기 백그라운드 큐 콘솔 출력 (Zero-Blocking)
-    # 예약 실행(10시 정각 0.1초 동시 예약)에 0.000초의 지연도 주지 않도록 별도 백그라운드 스레드에서 콘솔 출력 처리
-    log_queue = queue.Queue(-1)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    
-    queue_listener = QueueListener(log_queue, console_handler, respect_handler_level=True)
-    queue_listener.start()
-    
-    queue_handler = QueueHandler(log_queue)
-    logger.addHandler(queue_handler)
-    
-    # 2. 메모리 버퍼 출력 핸들러 (파일 쓰기 디스크 지연 방지)
-    memory_handler = MemoryLogHandler(log_file_path)
-    memory_handler.setFormatter(formatter)
-    logger.addHandler(memory_handler)
-    
-    # 로거 객체에 참조 보관
-    logger.queue_listener = queue_listener
-    logger.memory_handler = memory_handler
+    handlers = [logging.StreamHandler(sys.stdout)]
+    log_file_path = os.path.join(run_dir, f"auto_login_{now:%Y%m%d}.log")
+    handlers.append(logging.FileHandler(log_file_path, encoding="utf-8"))
+    for hour in dict.fromkeys(target_hours if target_hours is not None else [13, 14, 15]):
+        tab_dir = os.path.join(run_dir, str(hour))
+        os.makedirs(tab_dir)
+        handler = logging.FileHandler(os.path.join(tab_dir, "automation.log"), encoding="utf-8")
+        handler.addFilter(TabLogFilter(hour))
+        handlers.append(handler)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    log_queue = queue.Queue()
+    logger.addHandler(QueueHandler(log_queue))
+    logger.queue_listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
+    logger.output_handlers = handlers
     logger.log_file_path = log_file_path
-    
-    logger.info(f"초고속 제로-블로킹 비동기 로깅 시작 (최종 로그 경로: {log_file_path})")
+    logger.queue_listener.start()
+    if clean_existing:
+        logger.warning("clean_daily_logs는 폐기되었습니다. 실행별 기록을 보존합니다.")
+    logger.info(f"실행 로그: {log_file_path}")
     return logger
 
 
 def flush_logger_to_disk(logger: logging.Logger):
-    """메모리에 누적된 로그를 디스크 파일로 한 번에 쓰기 및 백그라운드 로깅 스레드 정상 종료"""
-    if hasattr(logger, "queue_listener") and logger.queue_listener:
-        try:
-            logger.queue_listener.stop()
-        except Exception:
-            pass
-    if hasattr(logger, "memory_handler") and logger.memory_handler:
-        logger.memory_handler.flush_to_disk()
+    """완료 요약 기록 후 호출하여 큐를 비우고 파일을 닫는다. 반복 호출 가능."""
+    listener = getattr(logger, "queue_listener", None)
+    if listener is not None:
+        listener.stop()
+        logger.queue_listener = None
+    for handler in getattr(logger, "output_handlers", []):
+        handler.flush()
+        handler.close()
+    logger.output_handlers = []
 
 
 def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:

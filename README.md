@@ -1,138 +1,83 @@
-# COSMAX eBiz 고속 입고예약 자동화 프로그램
+# COSMAX eBiz 입고예약 자동화
 
-COSMAX eBiz (`https://ebiz.cosmax.com/`) 시스템에 자동 로그인하여 매일 오전 10시 정각, **일반품목 13시·14시·15시 3개 시간대를 0.1초 만에 비동기 병렬 동시 예약**하는 초고속 무인 자동화 시스템입니다.
+COSMAX eBiz에 로그인하고 한국 시각 기준 목표 시각에 **청북2층·일반품목·13/14/15시**를 병렬로 처리합니다. 기존 체크를 유지하고, 미선택 항목 중 납품허용(`O`)이며 선택 가능한 자급자재를 위에서부터 3개 추가 선택하고 신규 예약의 파렛트/차량 수는 각각 1로 입력합니다. 수정 가능한 기존 예약은 품목을 먼저 조회하고 기존 파렛트/차량 수를 유지합니다. 예약일은 사이트가 제공하는 선택값을 사용하며 실행일과 다를 수 있습니다.
 
-**주말(토/일) 및 대한민국 법정 공휴일(대체공휴일 포함)에는 실행이 자동으로 건너뛰어집니다(SKIP).**
+저장 HTTP/JSON 응답과 새로 조회한 예약 목록의 업체·시간대·창고·예약번호를 확인합니다. `WAIT`는 확정과 구분하며, 별도 대기 저장 응답까지 확인합니다. 네트워크와 사이트 처리 속도에 따라 소요 시간이 달라집니다. 0.1초 완료나 예약 확보를 보장하지 않습니다.
 
----
+## 시작하기
 
-## 📚 상세 운영 및 기술 문서 (docs/)
+Python 3.13에서 로컬 검증했습니다. 계정 설정은 기존 `setup_account.bat` 또는 `config.json` 방식을 사용합니다.
 
-실무 운영 및 상세 환경 설정을 위해 `docs/` 디렉토리에 전용 매뉴얼이 제공됩니다:
+### Windows
 
-* 🪟 [**Windows PC 처음부터 시작하기 (상세 셋업 가이드)**](./docs/WINDOWS_SETUP_GUIDE.md) : 파이썬 미설치 PC 기준 A to Z 설치 및 초기 구성
-* 📘 [**실무 운영 및 모니터링 매뉴얼**](./docs/OPERATIONS_GUIDE.md) : 매일 아침 운영 루틴, 리포트 판독법, 스케줄러 관리 및 전원 수칙
-* 🛠️ [**장애 대응 및 트러블슈팅 가이드**](./docs/TROUBLESHOOTING.md) : 로그인 실패, 브라우저 오류, 10시 정각 슬롯 경쟁 실패 등 유형별 긴급 조치
+프로젝트 폴더의 명령 프롬프트에서 실행합니다.
 
----
+```bat
+run_automation.bat --install-only
+setup_account.bat
+run_automation.bat --check-config
+run_automation.bat --headful --force --dry-run
+```
 
-## 🚀 Windows 컴퓨터에서 처음부터 시작하기 (초보자 가이드)
+`--install-only`는 환경만 설치하고, `--check-config`는 브라우저 없이 설정만 검사합니다. `--dry-run`은 로그인과 조회·폼 입력까지 진행하지만 최종 저장을 하지 않습니다. 서버가 슬롯을 닫아 두었으면 점검도 해당 단계에서 중단될 수 있습니다. `--force`는 휴일 검사만 생략합니다.
 
-파이썬이나 개발 환경이 전혀 없는 **완전 새 윈도우 PC**에서도 아래 순서대로만 진행하면 5분 안에 세팅이 끝납니다.
+실제 예약 실행은 `run_automation.bat --headless --no-pause`입니다. 정기 실행은 `register_scheduler.bat`으로 등록합니다. Windows 로그인 상태와 한국 시간대 설정이 필요합니다.
 
-### 1단계: Python 설치 (★가장 중요)
-1. [Python 공식 다운로드 사이트](https://www.python.org/downloads/)에 접속하여 **Python 3.12** (또는 3.11) 설치 파일을 다운로드합니다.
-2. 다운로드한 설치 파일(`python-3.12.x-amd64.exe`)을 실행합니다.
-3. > [!CAUTION]
-   > 설치 창 맨 아래에 있는 **`[✓] Add python.exe to PATH`** 체크박스를 반드시 체크해야 합니다!  
-   > (체크하지 않으면 명령 프롬프트나 배치 파일에서 `python` 명령어를 찾지 못합니다.)
-4. **`Install Now`** 버튼을 클릭하여 설치를 완료하고 닫습니다.
+### macOS / Linux
 
-### 2단계: 프로그램 파일 준비 및 폴더 배치
-* 한글이나 띄어쓰기가 없는 깔끔한 영문 경로를 권장합니다.
-* 예시: **`C:\cip`** 폴더를 만들고, 다운로드받은 프로그램 파일 전체를 복사해 넣습니다.
+```bash
+python3 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
+venv/bin/python -m playwright install chromium
+venv/bin/python main.py --check-config
+./run_automation.sh --headful --force --dry-run
+```
 
-### 3단계: 계정 정보 설정 (`setup_account.bat` 더블 클릭! ⭐)
-* 비IT 사용자도 메모장으로 JSON을 수정할 필요 없이 마법사로 안전하게 설정할 수 있습니다.
-1. `C:\cip\setup_account.bat` 파일을 마우스로 **더블 클릭**합니다.
-2. 검은 창에 안내되는 질문에 따라 본인의 **eBiz 아이디와 비밀번호를 입력**하고 Enter를 누릅니다.
-3. 자동으로 안전한 `config.json` 파일이 생성됩니다.
-> [!TIP]
-> **🔒 Git 보안 관리**: 실제 비밀번호가 적힌 `config.json`은 `.gitignore`에 등록되어 **Git에 절대 업로드되지 않습니다.** Git에는 비밀번호가 없는 템플릿 파일(`config.example.json`)만 공유되므로 팀원 간 안전하게 코드를 공유할 수 있습니다.
+실제 예약 실행: `./run_automation.sh --headless`.
 
-### 4단계: 최초 의존성 자동 설치 (원클릭)
-1. `C:\cip\run_automation.bat` 파일을 마우스로 **더블 클릭**합니다.
-2. 프로그램이 스스로 가상환경(`venv`)을 만들고 필수 패키지와 전용 Chromium 브라우저를 자동으로 설치합니다. (최초 1회만 약 1~2분 소요)
+## 실행과 결과
 
-### 5단계: 화면 보면서 정상 작동 테스트 (리허설)
-1. 키보드의 `Win + R`을 누르고 `cmd`를 입력하여 명령 프롬프트를 엽니다.
-2. 아래 명령어를 복사하여 붙여넣고 실행합니다:
-   ```cmd
-   cd /d C:\cip
-   run_automation.bat --headful --force
-   ```
-3. 브라우저가 화면에 뜨면서 로그인 및 3개 탭 오픈이 정상적으로 진행되는지 눈으로 확인합니다. (테스트가 끝나면 창을 닫습니다.)
+1. 설정과 휴일을 검사하고 한 번 로그인한 세션으로 시간대별 탭을 준비합니다.
+2. 창고 선택과 예약 목록 조회를 확인합니다. HTTP `Date` 헤더는 시각 참고값이며 NTP 정밀 동기화가 아닙니다. 한국 시각 목표까지 대기하며 마지막 5초에는 세션 유지 요청을 보내지 않습니다.
+3. 예약일·시간·창고·일반품목을 검증하고 자급자재를 조회합니다. 사이트 오류 알림은 숨기지 않고 중단합니다.
+4. 저장 직전 로컬 중복 방지 기록을 남기고, 저장 및 재조회 결과를 분류합니다.
 
-### 6단계: 매일 평일 무인 자동 스케줄러 등록
-1. `C:\cip\register_scheduler.bat` 파일을 찾습니다.
-2. 마우스 우클릭 ➔ **[관리자 권한으로 실행]**을 클릭합니다.
-3. `[성공] Windows 작업 스케줄러 등록이 완료되었습니다!` 문구가 뜨면 등록 완료입니다.
-4. 이제 **매주 월~금 오전 09:50에 브라우저는 백그라운드로 돌면서 콘솔 창이 화면에 열려 실시간 진행 상황을 보여주고, 10시 예약 완료 후 60초 뒤 스스로 닫힙니다.**
+| 상태 | 의미 |
+|---|---|
+| `CONFIRMED` | 저장 성공 및 예약번호 재조회 확인, 또는 같은 예약의 이전 확인 기록 |
+| `WAIT` | 대기 접수 확인. 납품 가능한 확정 상태와 다름 |
+| `FAILED` | 준비 실패 또는 명시적인 저장 거절 |
+| `UNKNOWN` | 저장 시도 이후 응답/후속 저장/재조회 검증이 끝나지 않음 |
+| `SUBMITTING` | 저장 시도 기록만 남음. 실행 중 또는 비정상 종료 여부 확인 필요 |
+| `EXISTING` | 이전 버전에서 기존 예약번호 때문에 중단한 결과. 현재는 체크박스가 활성화되어 있으면 기존 품목 조회 후 추가 진행 |
+| `DRY_RUN` | 저장 전까지 점검 완료 |
+| `SKIPPED` | 휴일로 실행 생략 |
 
-### 7단계: 무인 PC 필수 설정 (절전 모드 해제)
-* PC가 잠자기(Sleep)에 들어가면 스케줄러가 켜지지 못할 수 있습니다.
-* `Windows 설정` ➔ `시스템` ➔ `전원` ➔ **절전 모드(PC를 절전 상태로 전환)를 `해당 없음(안 함)`**으로 설정하세요. (화면 끄기는 상관없습니다.)
+종료 코드: **0** 전체 확정·점검 완료·휴일 생략, **1** 실패, **2** 일부 성공 또는 대기/결과 미확인/기존 내역 확인 필요. `0`만으로 실제 예약 실행 여부를 판단하지 말고 `result.json`의 상태도 확인합니다.
 
----
-
-## ⚡ 주요 핵심 기능
-
-1. **단일 로그인 세션 기반 3개 탭 비동기 병렬 예약 (`asyncio.gather`)**:
-   * 동일 계정(`S102190`)의 중복 로그인 차단(세션 튕김)을 원천 방지하기 위해 1회 로그인 세션(BrowserContext)을 공유.
-   * 13시, 14시, 15시 전담 탭 3개가 10:00:00 정각에 **0.1초의 지연도 없이 동시에 서버로 예약 신청을 제출**.
-2. **10시 정각 Fail-Safe 마이크로 재조회 루프 (방안 B)**:
-   * 전체 새로고침(F5) 대신 **[지류]청북2층 라디오 버튼 재클릭(가벼운 AJAX 그리드 갱신)**을 통해 0.05초 만에 최신 체크박스를 갱신.
-   * 0.3초 간격 최대 5회(총 1.5초) 감지하며, **체크박스 발견 즉시 0.00초 만에 클릭하고 루프를 즉시 탈출(Break)**하여 불필요한 지연 방지.
-3. **원스톱 JS 브라우저 내부 배치 격발**:
-   * 모달 오픈 ➔ 자재 추가 ➔ 납품허용 'O' 품목 3개 선택 ➔ 팔레트(1)/차량(1) 입력 ➔ 저장까지 Playwright 브라우저 내부 단일 JavaScript 평가로 0.05초 만에 처리.
-4. **일자별 정예화 결과물 (`logs/YYYYMMDD/`)**:
-   * 날짜별 폴더 하나 안에 **실행 로그(`.log`) + 대화형 웹 리포트(`.html`) + 최종 결과 스크린샷 1장(`.png`)** 딱 3개만 보존.
-5. **Windows 작업 스케줄러 원클릭 등록/해제**:
-   * `register_scheduler.bat` / `unregister_scheduler.bat` 마우스 우클릭 관리자 실행 지원.
-6. **10시 정각 이전 무인 자동 복구(Auto-Healing) 2중 방어선**:
-   * **1차 (Python)**: 09:50~10:00 사이 일시적 네트워크 순단/오류 발생 시 5초 후 세션 자동 재접속 및 3개 탭 재준비 (최대 5회).
-   * **2차 (Windows)**: 스케줄러에 [실패 시 1분 간격 3회 자동 재시작] 및 [컴퓨터를 깨워 실행] 기본 자동 주입.
-
----
-
-## 📁 프로젝트 구조
+## 기록과 재실행
 
 ```text
-cip/
-├── docs/                         # 상세 운영 및 기술 문서
-│   ├── WINDOWS_SETUP_GUIDE.md    # Windows PC 신규 설치 및 환경 구축 상세 가이드
-│   ├── OPERATIONS_GUIDE.md       # 실무자/관리자를 위한 일일 운영 및 모니터링 매뉴얼
-│   └── TROUBLESHOOTING.md        # 장애 상황별 원인 분석 및 긴급 조치 매뉴얼
-├── src/
-│   ├── browser.py                # Playwright 브라우저 제어 및 3개 탭 비동기 병렬 예약 핵심 엔진
-│   ├── config.py                 # 설정 파일(config.json) 로드 및 검증 모듈
-│   ├── holiday.py                # 주말 및 대한민국 공휴일/대체공휴일 자동 판별 모듈
-│   ├── logger.py                 # 초고속 메모리 버퍼 로깅 및 반응형 HTML 디버깅 리포트 생성기
-│   └── setup_account.py          # 비IT 사용자용 터미널 계정 설정 마법사
-├── logs/                         # 일자별 실행 결과물 저장 디렉토리
-│   └── 20260911/
-│         ├── auto_login_20260911.log     # 실시간 타임스탬프 상세 실행 로그
-│         ├── auto_login_20260911.html    # 로그 레벨 필터링 및 스크린샷 확대 지원 HTML 리포트
-│         └── reservation_20260911.png    # 최종 결과 스크린샷 단 1장 (성공 또는 실패 지점)
-├── setup_account.bat             # 비IT 사용자용 계정(아이디/비번) 설정 원클릭 마법사
-├── config.example.json           # Git 업로드용 계정 설정 템플릿 (보안 보호)
-├── config.json                   # [로컬 전용] 실제 계정 정보 파일 (.gitignore 대상)
-├── main.py                       # 자동화 진입점 및 라이프사이클 오케스트레이터
-├── register_scheduler.bat        # Windows 작업 스케줄러 원클릭 자동 등록 스크립트
-├── unregister_scheduler.bat      # Windows 작업 스케줄러 원클릭 등록 해제 스크립트
-├── run_automation.bat            # Windows 환경 실행 배치 파일 (venv 가속 및 무인 모드 지원)
-├── run_automation.sh             # Mac/Linux 환경 실행 쉘 스크립트
-└── requirements.txt              # Python 필수 패키지 (playwright, holidays)
+logs/
+  reservation_state.sqlite3        # 실행 간 중복 저장 방지 기록
+  YYYYMMDD/HHMMSS_ffffff/
+    auto_login_YYYYMMDD.log
+    auto_login_YYYYMMDD.html
+    result.json
+    13/automation.log              # 시간대별 로그 (14/15도 동일)
+    attempt_1/13/*.png             # 시도·시간대·단계별 스크린샷
+    attempt_1/reservation_YYYYMMDD.png
 ```
 
----
+로그는 별도 큐에서 파일에 지속 기록하며 완료 요약 후 HTML을 만듭니다. 재실행 시 기존 기록을 삭제하지 않습니다. 스크린샷은 화면을 강제로 바꾸지 않은 참고 자료이며, 최종 판단은 예약 목록과 결과 상태를 사용합니다.
 
-## ⏰ Windows 무인 자동화 동작 라이프사이클
+서버에 예약번호가 있다는 이유만으로 중단하지 않습니다. 해당 시간대 체크박스가 활성화되어 있으면 기존 품목을 불러와 미선택 자재 3개를 추가합니다. 단, 이 자동화가 이미 처리한 동일 계정·예약일·창고·시간의 로컬 확정/대기 기록은 재저장하지 않습니다. `UNKNOWN`/`SUBMITTING`도 자동 재저장하지 않습니다. 사전 준비 오류만 목표 시각 이전에 자동 재시도합니다.
 
-```mermaid
-flowchart TD
-    A["매주 월~금 오전 09:50:00<br>(Windows 작업 스케줄러 자동 실행)"] --> B["run_automation.bat<br>(0.1초 만에 venv 활성화 및 main.py 호출)"]
-    B --> C{"오늘이 주말 또는<br>법정 공휴일인가?<br>(설날, 추석, 삼일절 등)"}
-    C -- "YES (공휴일/주말)" --> D["[SKIP] 오늘은 공휴일입니다 로그 기록<br>➔ 0.1초 만에 깔끔하게 정상 종료"]
-    C -- "NO (평일)" --> E["COSMAX eBiz 로그인 및<br>13시·14시·15시 3개 탭 사전 준비"]
-    E --> F["10:00:00 정각까지<br>Keep-Alive 세션 유지 대기"]
-    F --> G["10:00:00 정각 도달:<br>3개 탭 비동기 병렬 동시 예약 신청"]
-    G --> H["최종 결과 스크린샷 1장 저장 및<br>대화형 HTML 디버깅 리포트 생성 후 안전 종료"]
-```
+미처리 시간만 재실행하려면 `--hours 14 15`처럼 지정합니다. `UNKNOWN`은 **서버에 미등록임을 직접 확인한 시간만** `--hours 14 --retry-unknown`으로 재시도합니다. `SUBMITTING`은 실행 중인 프로세스가 없는지와 서버 내역을 확인한 후 운영 담당자가 해당 기록을 검토해야 합니다. 이 보호는 같은 `log_dir`을 공유하는 로컬 실행에만 적용됩니다. 폴더를 옮기거나 DB를 삭제하여 중복 방지를 우회하지 마세요.
 
----
+## 설정
 
-## ⚙️ `config.json` 설정 가이드
+설정 파일이 존재하지만 잘못된 JSON이면 기본값으로 진행하지 않고 종료합니다. 설정 파일이 없을 때의 기본값 처리 및 계정 저장 방식은 기존대로입니다. 상대 `log_dir`은 설정 파일이 있는 폴더를 기준으로 해석합니다.
 
 ```json
 {
@@ -140,65 +85,36 @@ flowchart TD
   "reservation_url": "https://ebiz.cosmax.com/inreservationReg/inreservationRegListNew.do?gblCompid=1200&TMENU=M00003&LMENU=M00084",
   "user_id": "S102190",
   "user_pw": "90801277**//123",
-  "target_hours": [13, 14, 15],
+  "target_hours": [
+    13,
+    14,
+    15
+  ],
   "target_time": "10:00:00",
   "keep_alive_interval_seconds": 30,
-  "grid_max_retries": 5,
-  "grid_retry_delay_seconds": 0.3,
   "headless": false,
   "skip_weekends": true,
   "skip_holidays": true,
-  "custom_holidays": []
+  "custom_holidays": [],
+  "grid_wait_timeout_seconds": 5,
+  "keep_alive_timeout_seconds": 3,
+  "dry_run": false
 }
 ```
 
-| 설정 키 | 기본값 | 설명 |
-| :--- | :---: | :--- |
-| `user_id` | `"S102190"` | COSMAX eBiz 로그인 사용자 계정 |
-| `user_pw` | - | 사용자 비밀번호 |
-| `target_hours` | `[13, 14, 15]` | 동시 예약 대상 시간대 목록 (일반품목 13시, 14시, 15시) |
-| `target_time` | `"10:00:00"` | 서버 슬롯 오픈 목표 시각 |
-| `grid_max_retries` | `5` | 10시 정각 시계 오차 대비 그리드 재조회 최대 횟수 (총 1.5초) |
-| `grid_retry_delay_seconds` | `0.3` | 그리드 재조회 간격 (초 단위) |
-| `keep_alive_interval_seconds` | `30` | 10시 정각까지 세션 유지 핑 전송 주기 |
-| `skip_weekends` | `true` | `true` 시 토요일/일요일 자동 SKIP |
-| `skip_holidays` | `true` | `true` 시 대한민국 법정 공휴일/대체공휴일 자동 SKIP |
-| `custom_holidays` | `[]` | 회사 창립일 등 추가 휴일 지정 (예: `["2026-09-25"]`) |
-| `headless` | `false` | 브라우저 창 표시 여부 (`true` 시 백그라운드 실행) |
+`target_hours`는 중복 없는 8/9/10/11/13/14/15시 목록입니다. 시간은 `HH:MM:SS`, 대기/시간 제한은 양수여야 합니다. 화면 표시 모드는 브라우저를 전체 화면으로 열고 실제 창 크기에 맞춥니다. `viewport_width`/`viewport_height`는 백그라운드(headless) 모드에서만 사용하며 기본값은 2200/1080입니다. `max_pre_target_retries` 기본값 5, `pre_target_retry_delay_seconds` 기본값 5입니다.
 
----
+`grid_max_retries`, `grid_retry_delay_seconds`, `screenshot_dir`은 사용하지 않습니다. 기존 `clean_daily_logs=true`도 로그를 삭제하지 않으며 경고를 남깁니다. 공휴일 검사가 켜져 있는데 `holidays`가 없으면 불완전한 달력으로 진행하지 않고 중단합니다.
 
-## 🔍 실행 결과 및 로그 디버깅
-
-매일 실행 후 `logs/YYYYMMDD/` 폴더에 3종의 결과 파일이 생성됩니다:
-
-1. **`auto_login_YYYYMMDD.html` (강력 추천)**:
-   * 더블 클릭하여 크롬/엣지 브라우저에서 바로 확인하는 시각화 리포트.
-   * `INFO`, `WARNING`, `ERROR` 로그 레벨 필터링 및 실시간 검색 지원.
-   * 우측 상단 스크린샷 썸네일 클릭 시 고해상도 확대 모달 지원.
-2. **`reservation_YYYYMMDD.png`**:
-   * 예약 성공 또는 실패 시점의 최종 브라우저 화면 캡처본 (일자별 1장 보존).
-3. **`auto_login_YYYYMMDD.log`**:
-   * 각 탭별 밀리초 단위 세부 실행 타임라인 및 네트워크 로그.
-
----
-
-## 💻 Mac / Linux (개발 환경) 실행 방법
+## 테스트
 
 ```bash
-cd /Users/user/Git/cip
-
-# 1. 가상환경 활성화 및 의존성 설치 (최초 1회)
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-
-# 2. 브라우저 화면을 보면서 테스트 실행 (Headful)
-./run_automation.sh --headful
-
-# 3. 주말/공휴일에도 강제로 테스트 실행 (--force)
-./run_automation.sh --headful --force
-
-# 4. 백그라운드(Headless) 무인 모드 실행
-./run_automation.sh --headless
+venv/bin/python -m unittest discover -s tests -v
+venv/bin/python -m pip check
 ```
+
+브라우저 테스트는 로컬 모의 페이지의 모든 요청을 가로채며 외부 예약을 만들지 않습니다. 실제 사이트의 DOM/응답 변경과 Windows 스케줄러 동작은 운영 환경에서 별도 확인해야 합니다.
+
+- [운영 가이드](docs/OPERATIONS_GUIDE.md)
+- [Windows 설치](docs/WINDOWS_SETUP_GUIDE.md)
+- [문제 해결](docs/TROUBLESHOOTING.md)
