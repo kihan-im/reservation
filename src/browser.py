@@ -457,10 +457,11 @@ class CosmaxAutomation:
             if old['status'] in ('CONFIRMED', 'WAIT'):
                 self.logger.info(f"[{tab_label}] 기존 처리 기록 유지: {old['status']} / {day}")
                 return dict(hour=hour, day=day, **old)
-            if old['status'] in ('UNKNOWN', 'SUBMITTING') and not (
-                old['status'] == 'UNKNOWN' and self.config.get('retry_unknown')
-            ):
+            if old['status'] == 'SUBMITTING':
+                self.logger.warning(f"[{tab_label}] 진행 중인 저장 기록 유지: SUBMITTING / {day}")
                 return dict(hour=hour, day=day, **old)
+            if old['status'] == 'UNKNOWN':
+                self.logger.info(f"[{tab_label}] 이전 UNKNOWN 기록을 재시도합니다: {old['detail']}")
         row = page.locator('table#list tr[id="1"]')
         warehouse = await row.locator('[aria-describedby="list_facgubn"]').text_content()
         if warehouse.strip() != '1':
@@ -506,7 +507,7 @@ class CosmaxAutomation:
             self.logger.info(f"[{tab_label}] [DRY_RUN] {day} / {hour}시 / 청북2층 / 일반품목 / 기존 선택 유지 및 자재 3개 추가 검증 완료. 저장 생략")
             return dict(hour=hour, day=day, status='DRY_RUN')
 
-        self.state.claim(key, self.config.get('retry_unknown', False))
+        self.state.claim(key)
         self.submitted_hours.add(hour)
         result = dict(hour=hour, day=day, status='UNKNOWN', detail='저장 결과 확인 필요')
         responses = []
@@ -572,7 +573,7 @@ class CosmaxAutomation:
             return result
         except Exception as error:
             result['detail'] = str(error)
-            self.logger.error(f"[{tab_label}] [UNKNOWN] {error}. 자동 재저장하지 않습니다.")
+            self.logger.error(f"[{tab_label}] [UNKNOWN] {error}. 이번 실행에서는 추가 저장하지 않습니다.")
             await self.capture_failure_screenshot(page, error, '저장_결과_미확인', hour)
             return result
         finally:

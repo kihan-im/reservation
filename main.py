@@ -48,7 +48,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="목표 시각 대기 및 최종 저장 없이 준비 과정 점검")
     parser.add_argument("--check-config", action="store_true", help="브라우저 없이 설정 유효성 점검")
     parser.add_argument("--hours", nargs="+", type=int, help="이번 실행에서 처리할 시간대")
-    parser.add_argument("--retry-unknown", action="store_true", help="서버에 미등록임을 직접 확인한 UNKNOWN 시간대 재시도")
+    parser.add_argument("--retry-unknown", action="store_true", help="호환용 옵션: 이전 UNKNOWN 기록은 기본적으로 재시도합니다")
     args = parser.parse_args()
     try:
         config = load_config(args.config)
@@ -59,7 +59,6 @@ def main():
         if args.hours is not None:
             config["target_hours"] = args.hours
         config["dry_run"] = args.dry_run or config["dry_run"]
-        config["retry_unknown"] = args.retry_unknown
         validate_config(config)
         if not os.path.isabs(config["log_dir"]):
             config["log_dir"] = os.path.join(os.path.dirname(os.path.abspath(args.config)), config["log_dir"])

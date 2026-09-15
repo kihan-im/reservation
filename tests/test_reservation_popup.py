@@ -323,14 +323,27 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
 
-    async def test_wrong_owner_in_refreshed_list_is_unknown(self):
+    async def test_unknown_result_retries_next_run_without_extra_flag(self):
         self.list_data['rows'][0]['colink5'] = 'another-vendor'
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
         before = self.requests.count('/saveInReservationItemListNew.do')
+        self.list_data['rows'][0]['colink5'] = '102190'
+        await self.page.reload()
         again = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(again['status'], 'UNKNOWN')
-        self.assertEqual(before, self.requests.count('/saveInReservationItemListNew.do'))
+        self.assertEqual(again['status'], 'CONFIRMED')
+        self.assertTrue(await self.page.locator('[aria-describedby="list_checkYn5"] input').is_checked())
+        self.assertEqual(before + 1, self.requests.count('/saveInReservationItemListNew.do'))
+        await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(before + 1, self.requests.count('/saveInReservationItemListNew.do'))
+
+    async def test_submitting_record_still_blocks_parallel_save(self):
+        key = self.automation.state.key('', '20990101', 13)
+        self.automation.state.claim(key)
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'SUBMITTING')
+        self.assertFalse(await self.page.locator('[aria-describedby="list_checkYn5"] input').is_checked())
+        self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
 
     async def test_save_http_error_cannot_be_confirmed(self):
         self.save_status = 503

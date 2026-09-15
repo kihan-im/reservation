@@ -37,12 +37,12 @@ class ReservationState:
             row = db.execute("SELECT status, detail FROM slots WHERE slot=?", (key,)).fetchone()
         return {"status": row[0], "detail": row[1]} if row else None
 
-    def claim(self, key, retry_unknown=False):
+    def claim(self, key):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT status FROM slots WHERE slot=?", (key,)).fetchone()
             # SUBMITTING may belong to another process; never steal it.
-            allowed = {"FAILED"} | ({"UNKNOWN"} if retry_unknown else set())
+            allowed = {"FAILED", "UNKNOWN"}
             if old and old[0] not in allowed:
                 raise RuntimeError(f"중복 저장 차단: {old[0]}. 서버 예약 내역과 실행 기록을 확인하세요.")
             db.execute("INSERT OR REPLACE INTO slots VALUES (?, 'SUBMITTING', ?)",

@@ -20,7 +20,7 @@
 | 시간대 미오픈/마감 | 사이트의 슬롯 상태 확인. 필요하면 `grid_wait_timeout_seconds` 조정. 폐기된 `grid_max_retries`는 효과 없음 |
 | Keep-Alive 실패 | 네트워크·로그인 만료 확인. 요청 제한은 `keep_alive_timeout_seconds`, 주기는 `keep_alive_interval_seconds` |
 | `WAIT` | 대기 접수 상태. 사이트에서 예약 확정으로 바뀌었는지 확인 |
-| `UNKNOWN` | 저장 응답 유실, 후속 대기 저장 실패, 예약번호 재조회 불일치 등. 먼저 서버 내역 확인 |
+| `UNKNOWN` | 저장 응답 유실, 후속 대기 저장 실패, 예약번호 재조회 불일치 등. 다음 실행에서는 이전 기록에 막히지 않고 다시 저장 시도. [RESULT]와 서버 내역으로 결과 확인 |
 | `SUBMITTING` | 같은 슬롯 실행 중이거나 비정상 종료. 다른 프로세스와 서버 내역을 확인하고 운영자 검토 |
 | `UnicodeDecodeError: cp949`로 설치 실패 | 이전 requirements.txt의 UTF-8 한글 주석을 pip 24.2가 CP949로 읽은 오류. 최신 requirements.txt와 run_automation.bat으로 교체한 뒤 `--install-only` 재실행 |
 | 메뉴 일부가 깨지고 `not recognized` 발생 | BAT 인코딩·줄바꿈 또는 파일 손상 여부 확인. 현재 BAT는 영문 ASCII 문구를 사용하며 메뉴 번호는 동일함. 최신 파일 전체를 교체 |
@@ -67,7 +67,7 @@ PowerShell에서는 명령 앞에 `.\`를 붙입니다. macOS/Linux에서는 `ru
 
 점검은 최종 저장을 생략하므로 저장 버튼 이후의 서버 검증·팝업까지 재현하지는 않습니다. `--headful --force`만 사용하면 실제 예약이 진행됩니다.
 
-`UNKNOWN` 재시도는 서버에 미등록임을 확인한 시간만 `--hours 13 --retry-unknown`으로 지정합니다. 로컬 확정·대기 기록을 지워 재저장하거나 DB 전체를 삭제하지 마세요. 서버의 기존 예약번호만 있고 로컬 처리 완료 기록이 없다면, 활성 슬롯의 품목 추가는 현재 지원하는 동작입니다. 자세한 규칙은 [운영 가이드](OPERATIONS_GUIDE.md)를 참고하세요.
+`UNKNOWN` 기록이 있어도 `run_automation.bat --headful --hours 13`으로 실행하면 실제 예약을 다시 시도합니다. 이전 오류 기록과 재시도 시작을 로그에 표시합니다. `--retry-unknown`은 호환용으로 유지하지만 지정할 필요가 없습니다. 로컬 확정·대기 기록을 지워 재저장하거나 DB 전체를 삭제하지 마세요. 서버의 기존 예약번호만 있고 로컬 처리 완료 기록이 없다면, 활성 슬롯의 품목 추가는 현재 지원하는 동작입니다. 자세한 규칙은 [운영 가이드](OPERATIONS_GUIDE.md)를 참고하세요.
 
 ## 회귀 검사
 

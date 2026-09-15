@@ -30,20 +30,20 @@ class RuntimeTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(file)
 
-    def test_atomic_claim_and_uncertain_result_cannot_repeat(self):
+    def test_unknown_can_retry_but_active_or_confirmed_claims_cannot_repeat(self):
         with tempfile.TemporaryDirectory() as folder:
             first, second = ReservationState(folder), ReservationState(folder)
             key = first.key('account','20990101',13)
             first.claim(key)
             with self.assertRaises(RuntimeError):
-                second.claim(key, retry_unknown=True)
-            first.finish(key, 'UNKNOWN')
-            with self.assertRaises(RuntimeError):
                 second.claim(key)
-            second.claim(key, retry_unknown=True)
+            first.finish(key, 'UNKNOWN')
+            second.claim(key)
+            with self.assertRaises(RuntimeError):
+                first.claim(key)
             second.finish(key, 'CONFIRMED', '예약번호 123')
             with self.assertRaises(RuntimeError):
-                first.claim(key, retry_unknown=True)
+                first.claim(key)
 
     def test_outcome_codes_preserve_partial_wait_and_unknown(self):
         for statuses, expected in [(['CONFIRMED']*3,0), (['CONFIRMED','FAILED'],2),
@@ -92,7 +92,7 @@ class RuntimeTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 current.claim(confirmed)
             with self.assertRaises(RuntimeError):
-                current.claim(pending, retry_unknown=True)
+                current.claim(pending)
             current.finish(pending, 'CONFIRMED', 'verified later')
             again = ReservationState(new_dir, legacy_paths=[old.path])
             self.assertEqual(again.get(pending)['detail'], 'verified later')
