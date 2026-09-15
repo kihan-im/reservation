@@ -26,6 +26,7 @@
 | 공휴일 패키지 없음 | 고정된 requirements.txt 설치. 불완전한 고정일 달력으로 진행하지 않음 |
 | BAT 더블클릭 후 예약이 시작되지 않음 | 현재는 통합 메뉴가 열림. 실제 예약은 5번, 저장 없는 점검은 4번 선택 |
 | 무인 실행에서 설치·설정 필요 오류 | `--no-pause` 없이 `--install-only`와 `--setup-account`를 먼저 실행한 뒤 `--check-config`로 검사 |
+| 스케줄러 등록 중 `MSFT_TaskExecAction` / `Action variable` 오류 | 이전 PowerShell 스크립트의 `$Action` 매개변수와 `$action` 변수 충돌. 최신 register_scheduler.ps1로 교체한 뒤 메뉴 6번으로 다시 등록 |
 | 스케줄러 미실행 | Windows 로그인 상태, 한국 시간대, 작업 동작 경로, 절전/전원 상태 확인 |
 
 ## Windows 설치 중 인코딩 오류
