@@ -118,7 +118,7 @@ class CosmaxAutomation:
             "--disable-default-apps"
         ]
         if not headless_mode:
-            launch_args.append("--start-fullscreen")
+            launch_args.append("--start-maximized")
         self.logger.info(f"[Step 1] 고속 경량 브라우저 기동 중... (Headless: {headless_mode})")
 
         try:
@@ -131,20 +131,20 @@ class CosmaxAutomation:
                 self.logger.error(f"브라우저 실행 실패: {err2}")
                 raise err2
 
-    async def set_fullscreen(self, context, page):
-        """로그인/팝업을 열기 전에 실제 Chromium 창을 전체 화면으로 설정한다."""
+    async def set_maximized(self, context, page):
+        """로그인/팝업을 열기 전에 탭과 주소 표시줄을 유지하며 실제 Chromium 창을 최대화한다."""
         if self.config.get("headless", False):
             return
         session = await context.new_cdp_session(page)
         try:
             window = await session.send("Browser.getWindowForTarget")
             await session.send("Browser.setWindowBounds", {
-                "windowId": window["windowId"], "bounds": {"windowState": "fullscreen"}
+                "windowId": window["windowId"], "bounds": {"windowState": "maximized"}
             })
             async with asyncio.timeout(6):
                 while True:
                     state = await session.send("Browser.getWindowBounds", {"windowId": window["windowId"]})
-                    if state["bounds"]["windowState"] == "fullscreen":
+                    if state["bounds"]["windowState"] == "maximized":
                         break
                     await asyncio.sleep(0.1)
             # 팝업이 없는 초기 화면에서만 창 크기를 변경한다.
@@ -643,7 +643,7 @@ async def execute_automation(config: dict, logger: logging.Logger):
 
             # 2. 첫 번째 탭에서 로그인 1회 수행 (JSESSIONID 확립 및 서버 시계 오차 계산)
             main_page = await context.new_page()
-            await automation.set_fullscreen(context, main_page)
+            await automation.set_maximized(context, main_page)
             await automation.perform_login(main_page)
             await automation.verify_session(context, main_page)
             tabs.append((target_hours[0], main_page))
@@ -651,7 +651,7 @@ async def execute_automation(config: dict, logger: logging.Logger):
             # 3. 추가 시간대(14시, 15시 등)를 위한 병렬 탭 동시 생성 (동일 context 내 세션 공유)
             for hr in target_hours[1:]:
                 tab_page = await context.new_page()
-                await automation.set_fullscreen(context, tab_page)
+                await automation.set_maximized(context, tab_page)
                 tabs.append((hr, tab_page))
 
             # 4. 각 탭 사전 준비 (예약 페이지 이동 + [지류]청북2층 선택 + dialog 자동 승인)

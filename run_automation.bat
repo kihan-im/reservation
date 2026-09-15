@@ -36,7 +36,7 @@ echo 1. Install / repair environment
 echo 2. Set up account
 echo 3. Check configuration
 echo 4. Test with browser - NO SAVE
-echo 5. Run reservation - full screen, SAVES DATA
+echo 5. Run reservation - maximized window, SAVES DATA
 echo 6. Register / update weekday schedule
 echo 7. Remove schedule
 echo 0. Exit

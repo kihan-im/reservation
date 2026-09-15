@@ -30,7 +30,7 @@ BAT 안내 문구는 Windows 인코딩 호환성을 위해 영문으로 표시�
 | 1 | 1번 | `run_automation.bat --install-only` | 가상환경·패키지·Chromium 설치 또는 복구 |
 | 2 | 2번 | `run_automation.bat --setup-account` | 계정과 환경 설정을 `config.json`에 저장 |
 | 3 | 3번 | `run_automation.bat --check-config` | 브라우저 없이 설정 검사 |
-| 4 | 4번 | `run_automation.bat --headful --force --dry-run` | 전체 화면으로 로그인·조회·폼 입력 점검, 최종 저장 생략 |
+| 4 | 4번 | `run_automation.bat --headful --force --dry-run` | 최대화된 창으로 로그인·조회·폼 입력 점검, 최종 저장 생략 |
 | 5 | 5번 | `run_automation.bat --headful` | 실제 예약 실행. 설정된 목표 시각까지 대기 후 저장 |
 | 6 | 6번 | `run_automation.bat --register-scheduler` | 평일 자동 실행 등록 또는 갱신 |
 
@@ -124,7 +124,7 @@ logs/
 }
 ```
 
-`target_hours`는 중복 없는 8/9/10/11/13/14/15시 목록입니다. 시간은 `HH:MM:SS`, 대기/시간 제한은 양수여야 합니다. 화면 표시 모드는 브라우저를 전체 화면으로 열고 실제 창 크기에 맞춥니다. `viewport_width`/`viewport_height`는 백그라운드(headless) 모드에서만 사용하며 기본값은 2200/1080입니다. `max_pre_target_retries` 기본값 5, `pre_target_retry_delay_seconds` 기본값 5입니다.
+`target_hours`는 중복 없는 8/9/10/11/13/14/15시 목록입니다. 시간은 `HH:MM:SS`, 대기/시간 제한은 양수여야 합니다. 화면 표시 모드는 탭·주소 표시줄이 보이도록 브라우저 창을 최대화하고 실제 창 크기에 맞춥니다. `viewport_width`/`viewport_height`는 백그라운드(headless) 모드에서만 사용하며 기본값은 2200/1080입니다. `max_pre_target_retries` 기본값 5, `pre_target_retry_delay_seconds` 기본값 5입니다.
 
 `grid_max_retries`, `grid_retry_delay_seconds`, `screenshot_dir`은 사용하지 않습니다. 기존 `clean_daily_logs=true`도 로그를 삭제하지 않으며 경고를 남깁니다. 공휴일 검사가 켜져 있는데 `holidays`가 없으면 불완전한 달력으로 진행하지 않고 중단합니다.
 
