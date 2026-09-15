@@ -4,12 +4,14 @@
 """COSMAX eBiz 예약 준비, 정상 클릭, 서버 저장 및 재조회 검증."""
 
 import os
+import sys
 import asyncio
 import logging
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, parse_qs
 from src.reservation_state import ReservationState, now_kst
+from src.window_capture import capture_browser_window
 
 
 class CosmaxAutomation:
@@ -21,6 +23,8 @@ class CosmaxAutomation:
         self.state = ReservationState(config.get("state_dir", config.get("log_dir", "log")),
                                       legacy_paths=config.get("legacy_state_paths", []))
         self.submitted_hours = set()
+        self.dialog_capture_lock = asyncio.Lock()
+        self.dialog_count = {}
         self.server_offset_seconds = 0.0  # 서버 시간 - 로컬 시간 (초 단위 오차)
 
         now = datetime.now()
@@ -185,6 +189,28 @@ class CosmaxAutomation:
         self.logger.info(f"★ 세션 인증 확인 완료! (JSESSIONID: {jsessionid})")
         self.logger.info(f"현재 접속 위치: {page.url}")
 
+    async def handle_browser_dialog(self, page, hour, dialog):
+        self.logger.info(f"★ [{hour}시 탭] 브라우저 알림/팝업 ({dialog.type}): {dialog.message}")
+        try:
+            if sys.platform == 'win32' and not self.config.get('headless', False):
+                self.dialog_count[hour] = self.dialog_count.get(hour, 0) + 1
+                path = os.path.join(self.get_tab_output_dir(hour),
+                                    f"{self.image_prefix}_{hour:02d}_browser_dialog_{self.dialog_count[hour]:02d}.png")
+                # 동시에 뜬 탭을 한 번에 하나씩 촬영한다. 클릭 제한(6초)보다 먼저 팝업을 처리한다.
+                async with asyncio.timeout(4):
+                    async with self.dialog_capture_lock:
+                        await capture_browser_window(page, path)
+                self.logger.info(f"📷 [{hour}시 탭] 브라우저 팝업 스크린샷 저장: {path}")
+            else:
+                self.logger.info(f"[{hour}시 탭] 브라우저 팝업은 문구로 기록합니다. 창 캡처는 Windows 화면 표시 모드에서 지원합니다.")
+        except Exception as error:
+            self.logger.warning(f"[{hour}시 탭] 브라우저 팝업 캡처 실패: {error}. 문구 기록 후 확인을 누릅니다.")
+        finally:
+            try:
+                await dialog.accept()
+            except Exception as error:
+                self.logger.warning(f"[{hour}시 탭] 브라우저 팝업 승인 실패: {error}")
+
     async def prepare_reservation_tab(self, page, hour: int):
         """
         개별 탭의 사전 준비 단계:
@@ -196,13 +222,8 @@ class CosmaxAutomation:
         tab_label = f"{hour}시 탭"
         self.logger.info(f"[{tab_label}] 예약 탭 준비 시작...")
 
-        # 다이얼로그 자동 승인 리스너 등록
         async def handle_dialog(dialog):
-            self.logger.info(f"★ [{tab_label}] 브라우저 알림/팝업 즉시 승인: '{dialog.message}'")
-            try:
-                await dialog.accept()
-            except Exception:
-                pass
+            await self.handle_browser_dialog(page, hour, dialog)
 
         page.on("dialog", handle_dialog)
 

@@ -8,11 +8,13 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 from playwright.async_api import async_playwright
 from src.browser import CosmaxAutomation
 from src.logger import setup_logger, flush_logger_to_disk, generate_html_log
+from src.window_capture import capture_browser_window
 
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
@@ -144,6 +146,38 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await self.automation.reserve_single_slot(self.page, 13)
         self.assertFalse(await self.page.evaluate("window.saved"))
         self.assertNotIn("/saveInReservationItemListNew.do", self.requests)
+
+    async def test_native_dialog_is_captured_before_accept_and_failures_do_not_block(self):
+        for mode in ('capture', 'failure', 'headless'):
+            with self.subTest(mode=mode):
+                self.automation.config['headless'] = mode == 'headless'
+                sequence = []
+
+                async def capture(page, path):
+                    sequence.append('capture')
+                    if mode == 'failure':
+                        raise TimeoutError('capture timeout')
+                    self.assertIn('_13_browser_dialog_', path)
+                    Path(path).write_bytes(b'PNG stub')
+                    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'', b'')))
+                    with patch('src.window_capture.asyncio.create_subprocess_exec', return_value=process):
+                        await capture_browser_window(page, path)
+
+                async def handle(dialog):
+                    sequence.append(dialog.message)
+                    await self.automation.handle_browser_dialog(self.page, 13, dialog)
+                    sequence.append('accepted')
+
+                self.page.on('dialog', handle)
+                try:
+                    with patch('src.browser.sys.platform', 'win32'), \
+                         patch('src.browser.capture_browser_window', side_effect=capture):
+                        result = await self.page.evaluate("confirm('예약신청 확인')")
+                        self.assertTrue(result)
+                finally:
+                    self.page.remove_listener('dialog', handle)
+                expected = ['예약신청 확인', 'accepted'] if mode == 'headless' else ['예약신청 확인', 'capture', 'accepted']
+                self.assertEqual(sequence, expected)
 
     async def test_artifacts_stay_in_date_hour_folders_across_retries(self):
         root = Path(self.tmp.name) / 'log'
