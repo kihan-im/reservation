@@ -20,11 +20,21 @@
 | `WAIT` | 대기 접수 상태. 사이트에서 예약 확정으로 바뀌었는지 확인 |
 | `UNKNOWN` | 저장 응답 유실, 후속 대기 저장 실패, 예약번호 재조회 불일치 등. 먼저 서버 내역 확인 |
 | `SUBMITTING` | 같은 슬롯 실행 중이거나 비정상 종료. 다른 프로세스와 서버 내역을 확인하고 운영자 검토 |
+| `UnicodeDecodeError: cp949`로 설치 실패 | 이전 requirements.txt의 UTF-8 한글 주석을 pip 24.2가 CP949로 읽은 오류. 최신 requirements.txt와 run_automation.bat으로 교체한 뒤 `--install-only` 재실행 |
+| 메뉴 일부가 깨지고 `not recognized` 발생 | BAT 인코딩·줄바꿈 또는 파일 손상 여부 확인. 현재 BAT는 영문 ASCII 문구를 사용하며 메뉴 번호는 동일함. 최신 파일 전체를 교체 |
 | 설치 실패 | `run_automation.bat --install-only`의 첫 실패 명령 확인. 프록시/인터넷/권한 확인 후 재시도 |
 | 공휴일 패키지 없음 | 고정된 requirements.txt 설치. 불완전한 고정일 달력으로 진행하지 않음 |
 | BAT 더블클릭 후 예약이 시작되지 않음 | 현재는 통합 메뉴가 열림. 실제 예약은 5번, 저장 없는 점검은 4번 선택 |
 | 무인 실행에서 설치·설정 필요 오류 | `--no-pause` 없이 `--install-only`와 `--setup-account`를 먼저 실행한 뒤 `--check-config`로 검사 |
 | 스케줄러 미실행 | Windows 로그인 상태, 한국 시간대, 작업 동작 경로, 절전/전원 상태 확인 |
+
+## Windows 설치 중 인코딩 오류
+
+`UnicodeDecodeError: 'cp949' codec can't decode byte 0x80 in position 23`은 이전 `requirements.txt` 첫 줄의 한글 주석에서 재현됩니다. pip 업데이트 안내는 실패 원인이 아닙니다. 현재 패키지 목록의 주석과 BAT 안내는 ASCII로 작성하여 Windows 코드 페이지의 영향을 제거했습니다. 계정 설정 마법사는 기존 한국어 안내를 유지합니다.
+
+1. Windows 프로젝트 폴더의 `run_automation.bat`과 `requirements.txt`를 최신 파일 전체로 교체합니다. `config.json`과 기존 `venv`는 유지합니다.
+2. 프로젝트 폴더에서 `run_automation.bat --install-only`를 다시 실행합니다.
+3. 설치 성공 후 `run_automation.bat --check-config`를 실행합니다. 계정 설정이 필요하면 `run_automation.bat --setup-account`를 먼저 실행합니다.
 
 ## 저장 팝업이 안 보이거나 `UNKNOWN`으로 끝날 때
 

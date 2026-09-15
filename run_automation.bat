@@ -1,9 +1,9 @@
 @echo off
 setlocal
-REM Windows 시스템 기본 경로(System32) 강제 확보 (환경변수 PATH 누락 방지)
+REM Keep Windows system tools available even when PATH is incomplete.
 set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0\;%PATH%"
 
-REM 일반적인 사용자 Python 설치 경로 자동 탐색 및 PATH 보강
+REM Add common Python installation directories to PATH.
 if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PATH=%LocalAppData%\Programs\Python\Python312;%LocalAppData%\Programs\Python\Python312\Scripts;%PATH%"
 if exist "%LocalAppData%\Programs\Python\Python311\python.exe" set "PATH=%LocalAppData%\Programs\Python\Python311;%LocalAppData%\Programs\Python\Python311\Scripts;%PATH%"
 if exist "%LocalAppData%\Programs\Python\Python310\python.exe" set "PATH=%LocalAppData%\Programs\Python\Python310;%LocalAppData%\Programs\Python\Python310\Scripts;%PATH%"
@@ -30,17 +30,17 @@ goto :CHECK_ENV
 
 :MENU
 echo ===================================================
-echo COSMAX eBiz - 작업 선택
+echo COSMAX eBiz - Select a task
 echo ===================================================
-echo 1. 실행 환경 설치 / 복구
-echo 2. 계정 설정
-echo 3. 설정 검사
-echo 4. 저장 없이 화면 점검
-echo 5. 실제 예약 실행 - 전체 화면
-echo 6. 평일 자동 실행 등록 / 갱신
-echo 7. 자동 실행 등록 해제
-echo 0. 종료
-choice /c 12345670 /n /m "번호를 선택하세요: "
+echo 1. Install / repair environment
+echo 2. Set up account
+echo 3. Check configuration
+echo 4. Test with browser - NO SAVE
+echo 5. Run reservation - full screen, SAVES DATA
+echo 6. Register / update weekday schedule
+echo 7. Remove schedule
+echo 0. Exit
+choice /c 12345670 /n /m "Select a number: "
 if errorlevel 255 goto :END
 if errorlevel 8 exit /b 0
 if errorlevel 7 goto :UNREGISTER
@@ -87,7 +87,7 @@ goto :READY
 
 :INSTALL
 if "%NO_PAUSE%"=="1" (
-    echo [오류] 실행 환경 설치가 필요합니다. 수동으로 run_automation.bat --install-only 를 실행하세요.
+    echo [ERROR] Setup required. Run run_automation.bat --install-only manually.
     goto :END
 )
 if exist "venv\Scripts\python.exe" goto :PACKAGES
@@ -106,13 +106,13 @@ if errorlevel 1 goto :INSTALL_FAIL
 :READY
 if "%INSTALL_ONLY%"=="1" (
     set "EXIT_CODE=0"
-    echo [완료] 실행 환경 설치 완료. 예약은 실행하지 않았습니다.
+    echo [OK] Environment installed. No reservation was submitted.
     goto :END
 )
 if "%SETUP_ACCOUNT%"=="1" goto :SETUP_ACCOUNT
 if exist "config.json" goto :RUN
 if "%NO_PAUSE%"=="1" (
-    echo [오류] config.json이 없습니다. run_automation.bat --setup-account로 먼저 설정하세요.
+    echo [ERROR] Missing config.json. Run run_automation.bat --setup-account first.
     goto :END
 )
 venv\Scripts\python.exe src\setup_account.py
@@ -126,7 +126,7 @@ goto :END
 
 :SETUP_ACCOUNT
 if "%NO_PAUSE%"=="1" (
-    echo [오류] 계정 설정에는 입력이 필요합니다. --no-pause 없이 실행하세요.
+    echo [ERROR] Account setup requires input. Run without --no-pause.
     goto :END
 )
 venv\Scripts\python.exe src\setup_account.py
@@ -134,9 +134,9 @@ set "EXIT_CODE=%errorlevel%"
 goto :END
 
 :INSTALL_FAIL
-echo [오류] 실행 환경 설치 실패. 위 오류를 해결한 뒤 --install-only로 재시도하세요.
+echo [ERROR] Installation failed. Fix the error above and retry with --install-only.
 
 :END
-echo [종료] 코드: %EXIT_CODE%
+echo [EXIT] Code: %EXIT_CODE%
 if "%NO_PAUSE%"=="0" pause
 exit /b %EXIT_CODE%

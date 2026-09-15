@@ -1,4 +1,4 @@
-# Python 3.13 로컬 검증 버전. 변경 시 Chromium 재설치 및 회귀 테스트 필요.
+# Verified on Python 3.13. Reinstall Chromium and run tests after changes.
 playwright==1.62.0
 holidays==0.104
 greenlet==3.5.5
