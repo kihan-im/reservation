@@ -98,3 +98,6 @@ ehthumbs_vista.db
 *~
 *.sublime-workspace
 *.sublime-project
+
+# Internal reservation state (outside user logs)
+.reservation_state/

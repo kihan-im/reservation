@@ -53,18 +53,50 @@ class RuntimeTest(unittest.TestCase):
 
     def test_logs_survive_rerun_and_include_completion_in_html(self):
         with tempfile.TemporaryDirectory() as folder:
-            log = setup_logger(folder,[13])
-            log.info('[13시 탭] [COMPLETE] CONFIRMED')
+            log = setup_logger(folder, [13, 14, 15])
+            first_paths = dict(log.tab_log_paths)
+            log.info('common login failure context')
+            log.info('[13시 탭] only thirteen')
+            log.info('[14시 탭] only fourteen')
+            log.info(r'[13시 탭] 스크린샷 저장: C:\Users\Test User\log\20260915\13\capture.png')
+            log.info('[COMPLETE] PARTIAL_OR_REVIEW')
             flush_logger_to_disk(log)
-            first = Path(log.log_file_path)
-            html = generate_html_log(str(first))
-            self.assertIn('[COMPLETE]',Path(html).read_text())
-            self.assertIn('[COMPLETE]',(first.parent/'13'/'automation.log').read_text())
-            next_log = setup_logger(folder,[13],clean_existing=True)
+            for hour, path in first_paths.items():
+                path = Path(path)
+                self.assertEqual(path.parent.name, str(hour))
+                self.assertEqual(path.parent.parent.parent, Path(folder))
+                report = Path(generate_html_log(str(path))).read_text()
+                self.assertIn('[COMPLETE]', report)
+                self.assertIn('common login failure context', report)
+                self.assertEqual('only thirteen' in report, hour == 13)
+                self.assertEqual('only fourteen' in report, hour == 14)
+                if hour == 13:
+                    self.assertIn('src="capture.png"', report)
+            first = Path(first_paths[13])
+            next_log = setup_logger(folder, [13], clean_existing=True)
             flush_logger_to_disk(next_log)
-            self.assertNotEqual(first,Path(next_log.log_file_path))
+            self.assertNotEqual(first, Path(next_log.tab_log_paths[13]))
             self.assertTrue(first.exists())
-            flush_logger_to_disk(next_log)
+            self.assertEqual({p.suffix for p in Path(folder).rglob('*') if p.is_file()}, {'.log', '.html'})
+
+    def test_old_reservation_records_survive_log_layout_change(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old = ReservationState(Path(folder) / 'logs')
+            confirmed = old.key('account', '20990101', 13)
+            pending = old.key('account', '20990101', 14)
+            old.finish(confirmed, 'CONFIRMED', 'existing reservation')
+            old.claim(pending)
+            new_dir = Path(folder) / '.reservation_state'
+            current = ReservationState(new_dir, legacy_paths=[old.path])
+            self.assertEqual(current.get(confirmed), old.get(confirmed))
+            with self.assertRaises(RuntimeError):
+                current.claim(confirmed)
+            with self.assertRaises(RuntimeError):
+                current.claim(pending, retry_unknown=True)
+            current.finish(pending, 'CONFIRMED', 'verified later')
+            again = ReservationState(new_dir, legacy_paths=[old.path])
+            self.assertEqual(again.get(pending)['detail'], 'verified later')
+            self.assertTrue(old.path.exists())
 
     def test_missing_holiday_dependency_is_not_silently_ignored(self):
         with patch('src.holiday.HAS_HOLIDAYS_PKG',False), self.assertRaisesRegex(RuntimeError,'holidays'):
@@ -111,7 +143,7 @@ class MainResultTest(unittest.TestCase):
         for mode, expected_code, expected_status in [('partial',2,'PARTIAL_OR_REVIEW'),('skip',0,'SKIPPED'),('error',1,'FAILED')]:
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
                 config=Path(folder)/'config.json'
-                config.write_text(json.dumps({'log_dir':folder, 'max_pre_target_retries':0}))
+                config.write_text(json.dumps({'log_dir':'logs', 'max_pre_target_retries':0}))
                 run=AsyncMock(return_value=[{'hour':13,'status':'CONFIRMED'}, {'hour':14,'status':'FAILED'}])
                 if mode == 'error':
                     run.side_effect=RuntimeError('preparation failed')
@@ -120,9 +152,14 @@ class MainResultTest(unittest.TestCase):
                      patch.object(entry,'check_is_weekend_or_holiday',return_value=(mode == 'skip','test holiday')):
                     code=entry.main()
                 self.assertEqual(code,expected_code)
-                result=json.loads(next(Path(folder).rglob('result.json')).read_text())
-                self.assertEqual(result['status'],expected_status)
-                self.assertIn('[COMPLETE]',next(Path(folder).rglob('*.html')).read_text())
+                log_root = Path(folder) / 'log'
+                self.assertFalse(list(log_root.rglob('*.json')))
+                self.assertEqual(len(list(log_root.glob('*/13/*.html'))), 1)
+                for report in log_root.rglob('*.html'):
+                    text = report.read_text()
+                    self.assertIn(f'[COMPLETE] {expected_status}', text)
+                    self.assertIn('[RESULT]', text)
+                self.assertEqual({p.suffix for p in log_root.rglob('*') if p.is_file()}, {'.log', '.html'})
                 if mode == 'skip':
                     run.assert_not_called()
 

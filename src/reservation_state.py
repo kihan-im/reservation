@@ -13,11 +13,17 @@ def now_kst():
 
 
 class ReservationState:
-    def __init__(self, log_dir):
-        self.path = Path(log_dir) / "reservation_state.sqlite3"
+    def __init__(self, state_dir, legacy_paths=()):
+        self.path = Path(state_dir) / "reservation_state.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS slots (slot TEXT PRIMARY KEY, status TEXT, detail TEXT)")
+            # 기존 기록을 병합하되 새 위치에서 갱신한 상태는 덮어쓰지 않는다.
+            for legacy_path in dict.fromkeys(map(Path, legacy_paths)):
+                if legacy_path.exists() and legacy_path.resolve() != self.path.resolve():
+                    with closing_connection(legacy_path) as old_db:
+                        rows = old_db.execute("SELECT slot, status, detail FROM slots").fetchall()
+                    db.executemany("INSERT OR IGNORE INTO slots VALUES (?, ?, ?)", rows)
 
     def connect(self):
         return closing_connection(self.path)

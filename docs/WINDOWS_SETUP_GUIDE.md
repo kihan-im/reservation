@@ -65,7 +65,7 @@ run_automation.bat --register-scheduler
 
 작업 스케줄러에서 동작 경로와 트리거를 확인합니다. **작업의 수동 실행 버튼은 실제 예약을 수행합니다.** 최초 확인은 위 `--dry-run` 명령을 사용하세요.
 
-정상 실행 결과는 [운영 가이드](OPERATIONS_GUIDE.md)의 `result.json`과 서버 예약 내역으로 판단합니다. 스케줄러 종료 코드만으로 확정 여부를 판단하지 않습니다. 등록 해제는 메뉴 7번 또는 다음 명령을 사용합니다.
+정상 실행 결과는 [운영 가이드](OPERATIONS_GUIDE.md)의 `log/날짜/시간대/automation_*.html` 결과와 서버 예약 내역으로 판단합니다. 스케줄러 종료 코드만으로 확정 여부를 판단하지 않습니다. 등록 해제는 메뉴 7번 또는 다음 명령을 사용합니다.
 
 ```bat
 run_automation.bat --unregister-scheduler

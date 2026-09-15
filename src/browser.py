@@ -18,21 +18,16 @@ class CosmaxAutomation:
         self.logger = logger
         self.current_step = "초기화"
         self.has_captured_screenshot = False
-        self.state = ReservationState(config.get("log_dir", "logs"))
+        self.state = ReservationState(config.get("state_dir", config.get("log_dir", "log")),
+                                      legacy_paths=config.get("legacy_state_paths", []))
         self.submitted_hours = set()
         self.server_offset_seconds = 0.0  # 서버 시간 - 로컬 시간 (초 단위 오차)
 
-        today_str = datetime.now().strftime("%Y%m%d")
-        if hasattr(logger, "log_file_path") and logger.log_file_path:
-            self.output_dir = os.path.dirname(os.path.abspath(logger.log_file_path))
-        else:
-            log_dir = config.get("log_dir", "logs")
-            self.output_dir = os.path.join(log_dir, today_str)
-        self.output_dir = os.path.join(self.output_dir, f"attempt_{config.get('attempt', 1)}")
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        # 일자별 폴더 내 1장만 보존 (성공/실패 공통 최종 결과 스크린샷)
-        self.screenshot_path = os.path.join(self.output_dir, f"reservation_{today_str}.png")
+        now = datetime.now()
+        self.output_dir = getattr(logger, "run_dir", None) or os.path.abspath(
+            os.path.join(config.get("log_dir", "log"), now.strftime("%Y%m%d")))
+        self.run_id = getattr(logger, "run_id", None) or now.strftime("%Y%m%d_%H%M%S_%f")
+        self.image_prefix = f"reservation_{self.run_id}_attempt{config.get('attempt', 1)}"
 
     def get_tab_output_dir(self, hour: int) -> str:
         """날짜별 로그 폴더 아래에서 시간대 탭 전용 산출물 경로를 반환한다."""
@@ -41,10 +36,12 @@ class CosmaxAutomation:
         return path
 
     async def capture_failure_screenshot(self, page, error: Exception, step_name: str = "", hour: int = None) -> str:
-        """
-        자동화 실패 발생 시 실패 지점 화면 캡처 및 ERROR 로그 기록
-        - 해당 일자 폴더에 reservation_YYYYMMDD.png 단 1장으로 저장/갱신
-        """
+        """실패 화면을 해당 시간대 폴더에 저장한다. 공통 실패는 각 시간대에 남긴다."""
+        if hour is None:
+            paths = []
+            for target_hour in self.config.get("target_hours", [13, 14, 15]):
+                paths.append(await self.capture_failure_screenshot(page, error, step_name, target_hour))
+            return next((path for path in paths if path), "")
         active_step = step_name or self.current_step or "오류발생"
         tab_label = f"[{hour}시 탭] " if hour is not None else ""
         self.logger.error(f"❌ {tab_label}[FAIL] 단계 '{active_step}' 수행 중 예외 발생: {error}",
@@ -52,13 +49,8 @@ class CosmaxAutomation:
 
         if page and not page.is_closed():
             try:
-                screenshot_path = self.screenshot_path
-                if hour is not None:
-                    today_str = datetime.now().strftime("%Y%m%d")
-                    screenshot_path = os.path.join(
-                        self.get_tab_output_dir(hour),
-                        f"reservation_{today_str}_{hour:02d}_failure.png",
-                    )
+                screenshot_path = os.path.join(
+                    self.get_tab_output_dir(hour), f"{self.image_prefix}_{hour:02d}_failure.png")
                 await page.screenshot(path=screenshot_path, full_page=False)
                 self.has_captured_screenshot = True
                 self.logger.error(f"★ {tab_label}[FAIL] 실패 지점 스크린샷 저장 완료: {screenshot_path}")
@@ -69,22 +61,11 @@ class CosmaxAutomation:
             self.logger.warning("페이지가 열려있지 않거나 이미 닫혀 있어 실패 스크린샷을 저장할 수 없습니다.")
         return ""
 
-    async def save_final_screenshot(self, page, success_hours: list) -> str:
-        """
-        예약 성공 시 최종 완료 화면 캡처 (단 1장)
-        - DOM이나 오류 알림을 변경하지 않고 현재 화면을 저장
-        """
-        self.current_step = "최종_스크린샷_저장"
-        if page and not page.is_closed():
-            try:
-                await page.screenshot(path=self.screenshot_path, full_page=False)
-                self.has_captured_screenshot = True
-                hours_str = ", ".join(f"{h}시" for h in success_hours)
-                self.logger.info(f"★ 최종 1회 마침 스크린샷 저장 완료 ({hours_str} 예약 화면): {self.screenshot_path}")
-                return self.screenshot_path
-            except Exception as ss_err:
-                self.logger.warning(f"최종 스크린샷 저장 중 에러 발생: {ss_err}")
-        return ""
+    async def save_final_screenshot(self, page, hour: int) -> str:
+        """현재 시간대의 마지막 화면을 같은 폴더에 저장한다."""
+        path = await self.save_stage_screenshot(page, hour, 10, "final")
+        self.has_captured_screenshot = bool(path) or self.has_captured_screenshot
+        return path
 
     async def save_stage_screenshot(self, page, hour: int, stage: int, name: str) -> str:
         """현재 뷰포트를 캡처한다. 전체 페이지 캡처는 사이트의 resize 핸들러로 팝업 순서를 바꾼다."""
@@ -92,10 +73,9 @@ class CosmaxAutomation:
             self.logger.warning(f"[{hour}시 탭] 단계 {stage:02d} 스크린샷을 저장할 페이지가 없습니다.")
             return ""
 
-        today_str = datetime.now().strftime("%Y%m%d")
         path = os.path.join(
             self.get_tab_output_dir(hour),
-            f"reservation_{today_str}_{hour:02d}_{stage:02d}_{name}.png",
+            f"{self.image_prefix}_{hour:02d}_{stage:02d}_{name}.png",
         )
         try:
             await page.screenshot(path=path, full_page=False)
@@ -605,7 +585,7 @@ async def execute_automation(config: dict, logger: logging.Logger):
     - 리소스 차단(폰트/미디어)으로 3개 탭 기동 가속
     - 1회 로그인 후 13시, 14시, 15시 3개 탭 생성
     - 서버 시계 10:00:00 정각 동시 예약 트리거 (asyncio.gather)
-    - 최종 1회 마침 스크린샷 저장
+    - 시간대별 최종 화면 저장
     """
     from playwright.async_api import async_playwright
 
@@ -643,10 +623,10 @@ async def execute_automation(config: dict, logger: logging.Logger):
 
             # 2. 첫 번째 탭에서 로그인 1회 수행 (JSESSIONID 확립 및 서버 시계 오차 계산)
             main_page = await context.new_page()
+            tabs.append((target_hours[0], main_page))
             await automation.set_maximized(context, main_page)
             await automation.perform_login(main_page)
             await automation.verify_session(context, main_page)
-            tabs.append((target_hours[0], main_page))
 
             # 3. 추가 시간대(14시, 15시 등)를 위한 병렬 탭 동시 생성 (동일 context 내 세션 공유)
             for hr in target_hours[1:]:
@@ -709,8 +689,8 @@ async def execute_automation(config: dict, logger: logging.Logger):
                     result = dict(hour=hr, status='UNKNOWN' if hr in automation.submitted_hours else 'FAILED', detail=str(result))
                 outcomes.append(result)
                 logger.info(f"[{hr}시 탭] [RESULT] {result}")
-            await automation.save_final_screenshot(ready_tabs[0][1],
-                [r['hour'] for r in outcomes if r['status'] == 'CONFIRMED'])
+            for hr, page_obj in ready_tabs:
+                await automation.save_final_screenshot(page_obj, hr)
             return outcomes
 
         except Exception as exc:

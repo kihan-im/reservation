@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-실행별 큐 기반 파일 로깅 및 HTML 보고서 생성 모듈
+날짜·시간대별 큐 기반 파일 로깅 및 HTML 보고서 생성 모듈
 """
 
 import os
@@ -14,13 +14,14 @@ from datetime import datetime
 
 
 class TabLogFilter(logging.Filter):
-    """특정 시간대 탭의 로그만 통과시킨다."""
+    """공통 로그와 해당 시간대의 로그만 통과시킨다."""
     def __init__(self, hour: int):
         super().__init__()
         self.tab_marker = f"[{hour}시 탭]"
 
     def filter(self, record):
-        return self.tab_marker in record.getMessage()
+        message = record.getMessage()
+        return not re.search(r"\[\d+시 탭\]", message) or self.tab_marker in message
 
 
 import queue
@@ -47,12 +48,13 @@ def disable_windows_quick_edit():
             pass
 
 
-def setup_logger(log_dir="logs", target_hours=None, clean_existing=False) -> logging.Logger:
-    """실행별 경로에 큐 기반 파일 로그를 지속 기록한다. 기존 기록은 삭제하지 않는다."""
+def setup_logger(log_dir="log", target_hours=None, clean_existing=False) -> logging.Logger:
+    """날짜·시간대 폴더에 실행별 파일 로그를 지속 기록한다. 기존 기록은 삭제하지 않는다."""
     disable_windows_quick_edit()
     now = datetime.now()
-    run_dir = os.path.join(log_dir, now.strftime("%Y%m%d"), now.strftime("%H%M%S_%f"))
-    os.makedirs(run_dir, exist_ok=False)
+    run_dir = os.path.abspath(os.path.join(log_dir, now.strftime("%Y%m%d")))
+    run_id = now.strftime("%Y%m%d_%H%M%S_%f")
+    os.makedirs(run_dir, exist_ok=True)
     logger = logging.getLogger("CosmaxAutoLogin")
     flush_logger_to_disk(logger)
     logger.handlers.clear()
@@ -60,12 +62,12 @@ def setup_logger(log_dir="logs", target_hours=None, clean_existing=False) -> log
     logger.propagate = False
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     handlers = [logging.StreamHandler(sys.stdout)]
-    log_file_path = os.path.join(run_dir, f"auto_login_{now:%Y%m%d}.log")
-    handlers.append(logging.FileHandler(log_file_path, encoding="utf-8"))
+    tab_log_paths = {}
     for hour in dict.fromkeys(target_hours if target_hours is not None else [13, 14, 15]):
         tab_dir = os.path.join(run_dir, str(hour))
-        os.makedirs(tab_dir)
-        handler = logging.FileHandler(os.path.join(tab_dir, "automation.log"), encoding="utf-8")
+        os.makedirs(tab_dir, exist_ok=True)
+        tab_log_paths[hour] = os.path.join(tab_dir, f"automation_{run_id}.log")
+        handler = logging.FileHandler(tab_log_paths[hour], encoding="utf-8")
         handler.addFilter(TabLogFilter(hour))
         handlers.append(handler)
     for handler in handlers:
@@ -74,11 +76,14 @@ def setup_logger(log_dir="logs", target_hours=None, clean_existing=False) -> log
     logger.addHandler(QueueHandler(log_queue))
     logger.queue_listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
     logger.output_handlers = handlers
-    logger.log_file_path = log_file_path
+    logger.tab_log_paths = tab_log_paths
+    logger.run_dir = run_dir
+    logger.run_id = run_id
     logger.queue_listener.start()
     if clean_existing:
         logger.warning("clean_daily_logs는 폐기되었습니다. 실행별 기록을 보존합니다.")
-    logger.info(f"실행 로그: {log_file_path}")
+    for hour, path in tab_log_paths.items():
+        logger.info(f"[{hour}시 탭] 실행 로그: {path}")
     return logger
 
 
@@ -143,15 +148,10 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
 
         # 스크린샷 파일 경로 감지 (.png 파일 매칭)
         img_path = None
-        img_match = re.search(r"([^\s:]+\.png)", message)
+        img_match = re.search(r"(?:[A-Za-z]:[\\/]|/)[^\r\n]*?\.png", message)
         if img_match:
-            raw_img_path = img_match.group(1).replace("\\", "/")
-            html_dir = os.path.dirname(os.path.abspath(html_file_path))
-            target_img_abs = os.path.abspath(raw_img_path)
-            try:
-                img_path = os.path.relpath(target_img_abs, html_dir).replace("\\", "/")
-            except Exception:
-                img_path = os.path.basename(raw_img_path)
+            # 시간대 HTML과 이미지는 같은 폴더에 있다. Windows 경로와 공백도 지원한다.
+            img_path = img_match.group(0).replace("\\", "/").rsplit("/", 1)[-1]
 
         parsed_entries.append({
             "idx": idx,

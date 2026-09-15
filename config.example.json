@@ -12,7 +12,7 @@
   "keep_alive_interval_seconds": 30,
   "max_pre_target_retries": 5,
   "pre_target_retry_delay_seconds": 5,
-  "log_dir": "logs",
+  "log_dir": "log",
   "headless": false,
   "viewport_width": 2200,
   "viewport_height": 1080,

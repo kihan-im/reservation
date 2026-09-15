@@ -11,6 +11,7 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 from src.browser import CosmaxAutomation
+from src.logger import setup_logger, flush_logger_to_disk, generate_html_log
 
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
@@ -142,6 +143,35 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await self.automation.reserve_single_slot(self.page, 13)
         self.assertFalse(await self.page.evaluate("window.saved"))
         self.assertNotIn("/saveInReservationItemListNew.do", self.requests)
+
+    async def test_artifacts_stay_in_date_hour_folders_across_retries(self):
+        root = Path(self.tmp.name) / 'log'
+        logger = setup_logger(str(root), [13, 14, 15])
+        config = dict(log_dir=str(root), state_dir=str(Path(self.tmp.name) / '.state'))
+        try:
+            first = CosmaxAutomation(config, logger)
+            paths = []
+            for hour in (13, 14, 15):
+                paths.append(Path(await first.save_stage_screenshot(self.page, hour, 1, 'opened')))
+                await first.save_final_screenshot(self.page, hour)
+            retry = CosmaxAutomation(dict(config, attempt=2), logger)
+            second = Path(await retry.save_stage_screenshot(self.page, 13, 1, 'opened'))
+            self.assertNotEqual(paths[0], second)
+            self.assertTrue(paths[0].exists())
+            self.assertEqual(paths[0].parent, second.parent)
+            await retry.capture_failure_screenshot(self.page, RuntimeError('common failure'))
+        finally:
+            flush_logger_to_disk(logger)
+        for hour, path in logger.tab_log_paths.items():
+            log = Path(path)
+            report = Path(generate_html_log(path)).read_text()
+            self.assertIn(f'src="{paths[hour - 13].name}"', report)
+            self.assertEqual(log.parent.name, str(hour))
+            self.assertEqual(log.parent.parent.parent, root)
+            self.assertIn('common failure', report)
+            self.assertEqual(len(list(log.parent.glob('*failure.png'))), 1)
+        self.assertEqual({p.suffix for p in root.rglob('*') if p.is_file()}, {'.png', '.log', '.html'})
+        self.assertEqual(len(list(root.glob('*/*'))), 3)
 
     async def test_normal_flow_waits_for_modal_and_grid_and_uses_real_clicks(self):
         result = await self.automation.reserve_single_slot(self.page, 13)

@@ -52,6 +52,8 @@ def main():
     args = parser.parse_args()
     try:
         config = load_config(args.config)
+        if config["log_dir"] == "logs":  # 이전 기본 경로를 새 구조로 전환
+            config["log_dir"] = "log"
         if args.headless or args.headful:
             config["headless"] = args.headless
         if args.hours is not None:
@@ -70,8 +72,11 @@ def main():
 
     start = now_kst()
     logger = setup_logger(config["log_dir"], config["target_hours"], config.get("clean_daily_logs", False))
-    log_path = logger.log_file_path
-    report_path = os.path.splitext(log_path)[0] + ".html"
+    config_dir = os.path.dirname(os.path.abspath(args.config))
+    config["state_dir"] = os.path.join(config_dir, ".reservation_state")
+    config["legacy_state_paths"] = [os.path.join(config["log_dir"], "reservation_state.sqlite3")]
+    if config["log_dir"] == os.path.join(config_dir, "log"):
+        config["legacy_state_paths"].append(os.path.join(config_dir, "logs", "reservation_state.sqlite3"))
     status, exit_code, results = "FAILED", 1, []
     logger.info(f"[START] {start.isoformat()} / 목표 {config['target_time']} KST / dry_run={config['dry_run']}")
     try:
@@ -102,22 +107,21 @@ def main():
         logger.exception(f"[FAILURE] {error}")
     finally:
         end = now_kst()
-        summary = dict(status=status, exit_code=exit_code, started_at=start.isoformat(),
-                       ended_at=end.isoformat(), dry_run=config['dry_run'], results=results)
-        try:
-            with open(os.path.join(os.path.dirname(log_path), "result.json"), "w", encoding="utf-8") as f:
-                json.dump(summary, f, ensure_ascii=False, indent=2)
-        except OSError as error:
-            exit_code = 1
-            logger.error(f"결과 파일 저장 실패: {error}")
+        by_hour = {result['hour']: result for result in results}
+        for hour in config['target_hours']:
+            result = by_hour.get(hour, dict(hour=hour, status='SKIPPED' if status == 'SKIPPED' else 'FAILED',
+                                           detail='공통 실행 로그 확인 필요'))
+            logger.info(f"[{hour}시 탭] [RESULT] {json.dumps(result, ensure_ascii=False)}")
+            report_path = os.path.splitext(logger.tab_log_paths[hour])[0] + ".html"
+            logger.info(f"[{hour}시 탭] 보고서: {report_path}")
         logger.info(f"[COMPLETE] {status} / 종료 코드 {exit_code} / 소요 {(end-start).total_seconds():.2f}초")
-        logger.info(f"보고서: {report_path}")
         flush_logger_to_disk(logger)
-        try:
-            generate_html_log(log_path)
-        except OSError as error:
-            print(f"HTML 보고서 생성 실패: {error}", file=sys.stderr)
-            exit_code = 1
+        for log_path in logger.tab_log_paths.values():
+            try:
+                generate_html_log(log_path)
+            except OSError as error:
+                print(f"HTML 보고서 생성 실패: {error}", file=sys.stderr)
+                exit_code = 1
     return exit_code
 
 

@@ -21,7 +21,7 @@ DEFAULT_CONFIG = {
     "user_pw": "90801277**//123",
     "target_time": "10:00:00",
     "keep_alive_interval_seconds": 30,
-    "log_dir": "logs",
+    "log_dir": "log",
     "headless": False,
     "viewport_width": 2200,
     "viewport_height": 1080,
