@@ -549,6 +549,8 @@ class CosmaxAutomation:
                 return el && el.getClientRects().length && (el.textContent.includes('등록') || el.textContent.includes('확정'));
             }""", timeout=6000)
             notice_text = await page.locator('#lyNoti').text_content()
+            self.logger.info(f"[{tab_label}] 저장 완료 안내: {notice_text.strip()}")
+            await self.save_stage_screenshot(page, hour, 8, 'save_notice')
             expected = '입고 예약이 확정' if status == 'CONFIRMED' else '입고예약 대기'
             if expected not in notice_text or f'[{hour:02d}:00]' not in notice_text:
                 raise RuntimeError(f'예상하지 않은 저장 알림: {notice_text}')

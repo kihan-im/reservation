@@ -8,6 +8,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from playwright.async_api import async_playwright
 from src.browser import CosmaxAutomation
@@ -173,8 +174,34 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({p.suffix for p in root.rglob('*') if p.is_file()}, {'.png', '.log', '.html'})
         self.assertEqual(len(list(root.glob('*/*'))), 3)
 
+    async def reserve_and_check_notice_capture(self, expected_text):
+        await self.page.evaluate("""() => {
+            const show = window.notice;
+            window.notice = text => setTimeout(() => show(text), 150);
+        }""")
+        original_screenshot = self.page.screenshot
+        captured = []
+
+        async def screenshot(**kwargs):
+            is_notice = kwargs['path'].endswith('_08_save_notice.png')
+            if is_notice:
+                self.assertTrue(await self.page.locator('#lyNoti').is_visible())
+                self.assertIn(expected_text, await self.page.locator('#lyNoti').inner_text())
+                self.assertFalse(kwargs['full_page'])
+            data = await original_screenshot(**kwargs)
+            if is_notice:
+                captured.append(Path(kwargs['path']))
+            return data
+
+        with patch.object(self.page, 'screenshot', side_effect=screenshot):
+            result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].read_bytes().startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertFalse(await self.page.locator('#lyNoti').is_visible())
+        return result
+
     async def test_normal_flow_waits_for_modal_and_grid_and_uses_real_clicks(self):
-        result = await self.automation.reserve_single_slot(self.page, 13)
+        result = await self.reserve_and_check_notice_capture('입고 예약이 확정')
         self.assertEqual(result["status"], "CONFIRMED")
         events = await self.page.evaluate("window.events")
         self.assertEqual([e['name'] for e in events], ['open', 'query', 'add', 'save'])
@@ -286,7 +313,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_wait_requires_followup_and_stays_wait(self):
         self.save_data = {'returnCode':'WAIT', 'returnCosmaxData':{'seq':'123', 'waitSeq':'0'}}
-        result = await self.automation.reserve_single_slot(self.page, 13)
+        result = await self.reserve_and_check_notice_capture('입고예약 대기')
         self.assertEqual(result['status'], 'WAIT')
         self.assertIn('/saveInReservationWait.do', self.requests)
 
