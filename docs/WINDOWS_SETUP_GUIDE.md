@@ -1,13 +1,19 @@
 # Windows 설치와 스케줄러
 
+`run_automation.bat`을 더블클릭하면 통합 메뉴가 열립니다. `register_scheduler.ps1`은 같은 폴더에 두세요. 설치(1번) → 계정 설정(2번) → 설정 검사(3번) → 저장 없는 점검(4번) 순서로 진행한 뒤, 수동 예약(5번) 또는 정기 실행 등록(6번)을 선택합니다. 등록 해제는 7번, 종료는 0번입니다.
+
+작업이 끝나면 종료 코드를 확인하고 아무 키나 눌러 창을 닫습니다. 다음 메뉴 작업은 BAT를 다시 열어 선택합니다. 명령에 옵션을 붙이면 메뉴를 건너뛰고 해당 작업을 수행합니다.
+
+필요한 실행 파일은 `run_automation.bat`과 `register_scheduler.ps1` 두 개입니다. 기존 개별 계정 설정·스케줄러 등록·해제 BAT 기능을 통합했습니다.
+
 ## 1. 준비
 
-Python 3.13과 인터넷 연결이 필요합니다. Python 설치 시 PATH 추가를 선택합니다. 프로젝트를 실행 계정이 읽고 쓸 수 있는 폴더에 두고, 명령 프롬프트에서 해당 폴더로 이동합니다.
+Python 3.13과 인터넷 연결이 필요합니다. Python 설치 시 PATH 추가를 선택합니다. 프로젝트를 실행 계정이 읽고 쓸 수 있는 폴더에 두고, 명령 프롬프트에서 해당 폴더로 이동합니다. PowerShell을 사용한다면 아래 BAT 명령 앞에 `.\`를 붙입니다. 예: `.\run_automation.bat --install-only`.
 
 ```bat
 python --version
 run_automation.bat --install-only
-setup_account.bat
+run_automation.bat --setup-account
 run_automation.bat --check-config
 ```
 
@@ -21,11 +27,27 @@ run_automation.bat --check-config
 run_automation.bat --headful --force --dry-run
 ```
 
-조회와 폼 입력까지 확인하고 저장 전 중단합니다. 예약 시간대가 활성화되지 않았으면 점검 실패가 정상일 수 있습니다. `--force`는 휴일만 무시하며 단독 사용 시 실제 저장이 가능합니다.
+브라우저가 전체 화면으로 열리며 조회와 폼 입력까지 확인하고 저장 전 중단합니다. 13시만 확인하려면 `--hours 13`을 추가합니다. 예약 시간대가 활성화되지 않았으면 점검 실패가 정상일 수 있습니다. `--force`는 휴일만 무시하며 단독 사용 시 실제 저장이 가능합니다.
 
-## 3. 정기 실행 등록
+## 3. 실제 수동 실행
 
-`register_scheduler.bat`을 실행합니다. 권한 오류가 발생하면 같은 실행 계정으로 관리자 권한 콘솔에서 재시도하세요. PowerShell이 설정과 등록된 작업 명령을 검사한 후 성공을 표시합니다. 기존 작업을 먼저 삭제하지 않고 갱신합니다.
+메뉴 5번 또는 다음 명령을 사용합니다.
+
+```bat
+run_automation.bat --headful
+```
+
+설정된 목표 시각까지 대기한 뒤 실제 저장을 수행합니다. 목표 시각이 지났으면 바로 진행합니다. 화면 없이 실행하려면 `--headless`를 사용합니다. 정기 실행만 사용할 경우 저장 없는 점검 후 다음 단계로 넘어갑니다.
+
+## 4. 정기 실행 등록
+
+메뉴 6번 또는 다음 명령을 실행합니다.
+
+```bat
+run_automation.bat --register-scheduler
+```
+
+권한 오류가 발생하면 같은 실행 계정으로 관리자 권한 콘솔에서 재시도하세요. PowerShell이 설정과 등록된 작업 명령을 검사한 후 성공을 표시합니다. 기존 작업을 먼저 삭제하지 않고 갱신합니다.
 
 - 작업 이름: `CosmaxAutoReservation`
 - 실행: 평일 09:50, `run_automation.bat --headless --no-pause`
@@ -37,10 +59,18 @@ run_automation.bat --headful --force --dry-run
 
 `--no-pause`는 성공과 실패 모두 입력 대기 없이 종료합니다. 환경이나 설정이 없으면 무인 상태에서 설치 마법사를 열지 않고 오류로 종료합니다. 설치와 계정 설정을 먼저 끝내세요.
 
-## 4. 운영 확인
+## 5. 운영 확인 및 등록 해제
 
 작업 스케줄러에서 동작 경로와 트리거를 확인합니다. **작업의 수동 실행 버튼은 실제 예약을 수행합니다.** 최초 확인은 위 `--dry-run` 명령을 사용하세요.
 
-정상 실행 결과는 [운영 가이드](OPERATIONS_GUIDE.md)의 `result.json`과 서버 예약 내역으로 판단합니다. 스케줄러 종료 코드만으로 확정 여부를 판단하지 않습니다. 등록 해제는 `unregister_scheduler.bat`을 사용합니다.
+정상 실행 결과는 [운영 가이드](OPERATIONS_GUIDE.md)의 `result.json`과 서버 예약 내역으로 판단합니다. 스케줄러 종료 코드만으로 확정 여부를 판단하지 않습니다. 등록 해제는 메뉴 7번 또는 다음 명령을 사용합니다.
+
+```bat
+run_automation.bat --unregister-scheduler
+```
+
+등록된 작업이 없으면 이미 해제된 상태로 안내합니다. 권한·서비스 오류가 발생하면 실패 코드와 오류를 표시합니다. 등록 해제는 예약 내역이나 로그를 삭제하지 않습니다.
+
+프로젝트 폴더를 옮겼다면 새 위치에서 등록 명령을 다시 실행하여 작업 경로를 갱신합니다. 패키지 변경·손상 시에는 `--install-only` → `--check-config` → `--headful --force --dry-run` 순서로 점검합니다.
 
 이 변경의 Windows 네이티브 동작은 macOS 로컬 테스트로 검증할 수 없으므로 대상 PC에서 설치·점검 모드·작업 등록을 확인해야 합니다.

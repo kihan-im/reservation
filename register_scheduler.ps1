@@ -1,5 +1,21 @@
+param (
+    [ValidateSet('Register', 'Unregister')]
+    [string]$Action = 'Register'
+)
+
 $ErrorActionPreference = 'Stop'
 try {
+    if ($Action -eq 'Unregister') {
+        # Enumerate tasks so an absent task is distinct from permission/service errors.
+        $task = Get-ScheduledTask | Where-Object { $_.TaskPath -eq '\' -and $_.TaskName -eq 'CosmaxAutoReservation' }
+        if ($task) {
+            Unregister-ScheduledTask -TaskName 'CosmaxAutoReservation' -TaskPath '\' -Confirm:$false
+            Write-Host '[OK] CosmaxAutoReservation removed.'
+        } else {
+            Write-Host '[OK] CosmaxAutoReservation is not registered.'
+        }
+        exit 0
+    }
     $python = Join-Path $PSScriptRoot 'venv\Scripts\python.exe'
     if (-not (Test-Path $python)) { throw 'Run run_automation.bat --install-only first.' }
     if (-not (Test-Path (Join-Path $PSScriptRoot 'config.json'))) { throw 'config.json is missing.' }

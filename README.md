@@ -6,34 +6,54 @@ COSMAX eBiz에 로그인하고 한국 시각 기준 목표 시각에 **청북2�
 
 ## 시작하기
 
-Python 3.13에서 로컬 검증했습니다. 계정 설정은 기존 `setup_account.bat` 또는 `config.json` 방식을 사용합니다.
+Python 3.13에서 로컬 검증했습니다. 처음 설치할 때는 아래 순서대로 진행하세요.
 
 ### Windows
 
-프로젝트 폴더의 명령 프롬프트에서 실행합니다.
+Python 3.13 설치 시 **Add Python to PATH**를 선택하고 프로젝트 폴더를 준비합니다. PowerShell에서 실행할 때는 명령 앞에 `.\`를 붙입니다.
 
-```bat
-run_automation.bat --install-only
-setup_account.bat
-run_automation.bat --check-config
-run_automation.bat --headful --force --dry-run
-```
+윈도우 실행 파일은 다음 **2개**를 함께 유지합니다.
 
-`--install-only`는 환경만 설치하고, `--check-config`는 브라우저 없이 설정만 검사합니다. `--dry-run`은 로그인과 조회·폼 입력까지 진행하지만 최종 저장을 하지 않습니다. 서버가 슬롯을 닫아 두었으면 점검도 해당 단계에서 중단될 수 있습니다. `--force`는 휴일 검사만 생략합니다.
+| 파일 | 역할 |
+|---|---|
+| `run_automation.bat` | 설치·계정 설정·점검·실제 예약·스케줄러 관리의 공통 실행 파일 |
+| `register_scheduler.ps1` | BAT에서 호출하는 스케줄러 등록·해제 처리 |
 
-실제 예약 실행은 `run_automation.bat --headless --no-pause`입니다. 정기 실행은 `register_scheduler.bat`으로 등록합니다. Windows 로그인 상태와 한국 시간대 설정이 필요합니다.
+**더블클릭 실행:** `run_automation.bat`을 열고 번호를 선택합니다. 작업이 끝나면 결과를 확인하고 아무 키나 눌러 닫습니다. 다음 단계는 다시 열어 선택합니다. 메뉴 5번은 실제 예약을 저장합니다.
+
+**명령으로 실행:** 프로젝트 폴더의 명령 프롬프트에서 아래 순서로 실행합니다.
+
+| 순서 | 메뉴 | 명령 | 수행 내용 |
+|---|---|---|---|
+| 1 | 1번 | `run_automation.bat --install-only` | 가상환경·패키지·Chromium 설치 또는 복구 |
+| 2 | 2번 | `run_automation.bat --setup-account` | 계정과 환경 설정을 `config.json`에 저장 |
+| 3 | 3번 | `run_automation.bat --check-config` | 브라우저 없이 설정 검사 |
+| 4 | 4번 | `run_automation.bat --headful --force --dry-run` | 전체 화면으로 로그인·조회·폼 입력 점검, 최종 저장 생략 |
+| 5 | 5번 | `run_automation.bat --headful` | 실제 예약 실행. 설정된 목표 시각까지 대기 후 저장 |
+| 6 | 6번 | `run_automation.bat --register-scheduler` | 평일 자동 실행 등록 또는 갱신 |
+
+5번은 수동 예약이 필요할 때, 6번은 정기 실행을 사용할 때 선택합니다. 정기 실행만 사용할 경우 4번 점검 후 6번으로 진행하면 됩니다. 목표 시각이 이미 지났다면 실제 실행은 대기 없이 진행합니다.
+
+특정 시간만 점검하려면 `run_automation.bat --headful --force --dry-run --hours 13`을 사용합니다. 사이트에서 해당 슬롯을 닫아 두었으면 점검도 중단될 수 있습니다. `--force`는 휴일 검사만 생략하며, 저장을 막는 옵션은 `--dry-run`입니다.
+
+스케줄러는 **평일 09:50**에 `run_automation.bat --headless --no-pause`를 실행하며, 기본 예약 목표 시각은 **10:00 한국 시각**입니다. Windows 로그인 상태와 한국 시간대 설정이 필요합니다. `--no-pause`는 종료 시 키 입력을 기다리지 않고, 환경이나 설정이 없으면 오류로 종료합니다.
+
+자동 실행을 중지하려면 메뉴 **7번** 또는 `run_automation.bat --unregister-scheduler`를 실행합니다. 메뉴 **0번**은 종료입니다. 프로젝트 폴더를 옮기면 새 위치에서 스케줄러를 다시 등록하세요. 이전 개별 BAT 3개의 기능은 공통 BAT에 통합했습니다.
 
 ### macOS / Linux
+
+프로젝트 폴더의 터미널에서 순서대로 실행합니다.
 
 ```bash
 python3 -m venv venv
 venv/bin/python -m pip install -r requirements.txt
 venv/bin/python -m playwright install chromium
+venv/bin/python src/setup_account.py
 venv/bin/python main.py --check-config
 ./run_automation.sh --headful --force --dry-run
 ```
 
-실제 예약 실행: `./run_automation.sh --headless`.
+점검 후 실제 예약 실행은 `./run_automation.sh --headful`입니다. 화면 없이 실행하려면 `./run_automation.sh --headless`를 사용합니다. Windows BAT 메뉴와 PowerShell 스케줄러는 이 환경에서 사용하지 않습니다.
 
 ## 실행과 결과
 
