@@ -32,6 +32,7 @@ import json
 import time
 from src.config import load_config, validate_config
 from src.logger import setup_logger, flush_logger_to_disk, generate_html_log
+from src.log_console import start_tab_consoles
 from src.holiday import check_is_weekend_or_holiday
 from src.browser import execute_automation
 from src.reservation_state import now_kst, outcome_exit_code
@@ -47,6 +48,8 @@ def main():
                         help="화면 표시 모드에서 영상 녹화. headless에서는 항상 생략")
     parser.add_argument("--force", action="store_true", help="주말/공휴일 검사만 생략")
     parser.add_argument("--no-pause", action="store_true", help="Windows 배치 무인 실행")
+    parser.add_argument("--split-consoles", action=argparse.BooleanOptionalAction, default=None,
+                        help="Windows 시간대별 로그 콘솔 (headless에서 기본 사용)")
     parser.add_argument("--dry-run", action="store_true", help="목표 시각 대기 및 최종 저장 없이 준비 과정 점검")
     parser.add_argument("--check-config", action="store_true", help="브라우저 없이 설정 유효성 점검")
     parser.add_argument("--hours", nargs="+", type=int, help="이번 실행에서 처리할 시간대")
@@ -73,6 +76,10 @@ def main():
 
     start = now_kst()
     logger = setup_logger(config["log_dir"], config["target_hours"], config.get("clean_daily_logs", False))
+    split_consoles = args.split_consoles if args.split_consoles is not None else (
+        sys.platform == 'win32' and config['headless'])
+    if split_consoles:
+        start_tab_consoles(logger)
     config_dir = os.path.dirname(os.path.abspath(args.config))
     config["state_dir"] = os.path.join(config_dir, ".reservation_state")
     config["legacy_state_paths"] = [os.path.join(config["log_dir"], "reservation_state.sqlite3")]
