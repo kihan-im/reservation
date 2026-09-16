@@ -17,10 +17,20 @@ from src.reservation_state import KST, ReservationState, outcome_exit_code
 
 
 class RuntimeTest(unittest.TestCase):
+    def test_legacy_log_directory_uses_single_canonical_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'config.json'
+            for old in ('logs', './logs', 'logs/', 'log'):
+                path.write_text(json.dumps({'log_dir': old}))
+                self.assertEqual(load_config(path)['log_dir'], 'log')
+            path.write_text(json.dumps({'log_dir': 'custom-output'}))
+            self.assertEqual(load_config(path)['log_dir'], 'custom-output')
+
     def test_invalid_config_fails_closed(self):
         for key, value in [('target_time','25:00:00'), ('target_hours',[]), ('target_hours',[13,13]),
                            ('target_hours',[12]), ('grid_wait_timeout_seconds',-1),
                            ('keep_alive_timeout_seconds',float('nan')), ('headless','false'), ('record_video','true'),
+                           ('site_timeout_seconds',0), ('save_timeout_seconds',float('inf')),
                            ('max_pre_target_retries',1.5), ('custom_holidays',['2026-02-30'])]:
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 validate_config(dict(DEFAULT_CONFIG, **{key:value}))
@@ -47,9 +57,24 @@ class RuntimeTest(unittest.TestCase):
 
     def test_outcome_codes_preserve_partial_wait_and_unknown(self):
         for statuses, expected in [(['CONFIRMED']*3,0), (['CONFIRMED','FAILED'],2),
-                                   (['WAIT'],2), (['UNKNOWN'],2), (['EXISTING'],2), (['FAILED'],1), ([],1)]:
+                                   (['WAIT'],2), (['UNKNOWN'],2), (['EXISTING'],2), (['NO_CHANGE'],2), (['FAILED'],1), ([],1)]:
             self.assertEqual(outcome_exit_code([dict(status=s) for s in statuses]), expected)
         self.assertEqual(outcome_exit_code([dict(status='DRY_RUN')], True),0)
+
+    def test_completed_recheck_locks_only_its_slot_and_restores_previous_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first, second = ReservationState(folder), ReservationState(folder)
+            key14 = first.key('account', '20990101', 14)
+            key15 = first.key('account', '20990101', 15)
+            first.finish(key14, 'CONFIRMED', 'previous')
+            previous = first.claim(key14, allow_completed=True)
+            with self.assertRaises(RuntimeError):
+                second.claim(key14, allow_completed=True)
+            other = second.claim(key15, allow_completed=True)
+            first.release(key14, previous)
+            second.release(key15, other)
+            self.assertEqual(first.get(key14), {'status':'CONFIRMED', 'detail':'previous'})
+            self.assertIsNone(first.get(key15))
 
     def test_logs_survive_rerun_and_include_completion_in_html(self):
         with tempfile.TemporaryDirectory() as folder:

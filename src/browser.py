@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit, parse_qs
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from src.reservation_state import ReservationState, now_kst
 from src.window_capture import capture_browser_window
 
@@ -26,6 +27,9 @@ class CosmaxAutomation:
         self.submitted_hours = set()
         self.dialog_capture_lock = asyncio.Lock()
         self.dialog_count = {}
+        self.browser_alerts = {}
+        self.site_timeout_ms = config.get('site_timeout_seconds', 60) * 1000
+        self.save_timeout_seconds = config.get('save_timeout_seconds', 120)
         self.server_offset_seconds = 0.0  # 서버 시간 - 로컬 시간 (초 단위 오차)
 
         now = datetime.now()
@@ -188,7 +192,7 @@ class CosmaxAutomation:
 
         # 로그인 제출 후 세션 확립 및 페이지 전환 대기
         try:
-            await page.wait_for_url(lambda u: "loginForm.do" not in u, timeout=5000)
+            await page.wait_for_url(lambda u: "loginForm.do" not in u, timeout=self.site_timeout_ms)
         except Exception:
             try:
                 await page.wait_for_load_state("networkidle", timeout=3000)
@@ -205,7 +209,11 @@ class CosmaxAutomation:
         self.logger.info(f"현재 접속 위치: {page.url}")
 
     async def handle_browser_dialog(self, page, hour, dialog):
-        self.logger.info(f"★ [{hour}시 탭] 브라우저 알림/팝업 ({dialog.type}): {dialog.message}")
+        message = ' '.join(dialog.message.split())
+        if dialog.type == 'alert':
+            self.browser_alerts.setdefault(hour, []).append(message)
+        log = self.logger.error if '품목 수 제한' in message else self.logger.info
+        log(f"★ [{hour}시 탭] 브라우저 알림/팝업 ({dialog.type}): {message}")
         try:
             if sys.platform == 'win32' and not self.config.get('headless', False):
                 self.dialog_count[hour] = self.dialog_count.get(hour, 0) + 1
@@ -252,28 +260,31 @@ class CosmaxAutomation:
         await self.check_site_notice(page, hour, "예약 페이지 준비")
         # jqTransform의 표시용 라디오를 정상 클릭하고 실제 input 선택도 검사한다.
         radio = page.locator('#selFactory1')
-        await radio.wait_for(state="attached", timeout=6000)
+        await radio.wait_for(state="attached", timeout=self.site_timeout_ms)
         if not await radio.is_checked():
             wrapper = page.locator('.jqTransformRadioWrapper:has(#selFactory1) a.jqTransformRadio')
             if await wrapper.is_visible():
-                await wrapper.click(timeout=6000)
+                await wrapper.click(timeout=self.site_timeout_ms)
             else:
-                await radio.check(timeout=6000)
+                await radio.check(timeout=self.site_timeout_ms)
         if not await radio.is_checked():
             raise RuntimeError(f"[{tab_label}] [지류]청북2층 선택 실패")
         await self.refresh_reservation_list(page, hour)
         self.logger.info(f"[{tab_label}] 로그인·창고·예약 목록 준비 확인 완료")
 
     async def refresh_reservation_list(self, page, hour):
-        async with page.expect_response(
-            lambda r: urlsplit(r.url).path.endswith('/selectInreservationListNew.do'), timeout=6000
-        ) as response_info:
-            await self.click_reservation_button(page, hour, '#btnSelect', '예약 목록 조회')
-        data = await self.read_json_response(await response_info.value, "예약 목록 조회")
+        response = await self.query_response(
+            page, hour, '#btnSelect', '예약 목록 조회',
+            lambda r: urlsplit(r.url).path.endswith('/selectInreservationListNew.do')
+        )
+        data = await self.read_json_response(response, "예약 목록 조회")
         if data.get("returnCode") in ("FAIL", "NOSES") or not isinstance(data.get("rows"), list):
             raise RuntimeError(f"[{hour}시 탭] 예약 목록 조회 실패: {data.get('returnMessage', '')}")
-        await page.locator('table#list tr[id="1"]').wait_for(state='attached', timeout=6000)
-        await page.locator('#load_list').wait_for(state='hidden', timeout=6000)
+        await page.locator('table#list tr[id="1"]').wait_for(state='attached', timeout=self.site_timeout_ms)
+        await page.locator('#load_list').wait_for(state='hidden', timeout=self.site_timeout_ms)
+        # 사이트는 목록 로딩 후 별도 AJAX로 마감 슬롯의 체크박스/등록 링크를 제거한다.
+        await page.wait_for_function('() => !window.jQuery || window.jQuery.active === 0',
+                                     timeout=self.site_timeout_ms)
         await self.check_site_notice(page, hour, "예약 목록 조회")
         return data
 
@@ -305,11 +316,45 @@ class CosmaxAutomation:
                 await asyncio.sleep(min(remaining, 0.02 if remaining <= 1 else 1))
         self.logger.info(f"목표 시각 {self.config.get('target_time', '10:00:00')} 도달. 예약을 시작합니다.")
 
-    async def read_json_response(self, response, step):
+    async def wait_with_progress(self, awaitable, hour, step):
+        """같은 요청을 기다리는 동안 진행 로그를 남긴다. 새 요청은 보내지 않는다."""
+        task = asyncio.ensure_future(awaitable)
+        elapsed = 0
+        try:
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=10)
+                if not done:
+                    elapsed += 10
+                    self.logger.warning(f"[{hour}시 탭] [WAITING] {step}: {elapsed}초 응답 지연, 기존 요청 계속 대기")
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def query_response(self, page, hour, selector, step, matcher):
+        """읽기 전용 조회만 일시적 과부하/시간 초과 시 최대 3회 시도한다."""
+        for attempt in range(3):
+            try:
+                async with page.expect_response(matcher, timeout=self.site_timeout_ms) as info:
+                    await self.click_reservation_button(page, hour, selector, step)
+                    response = await self.wait_with_progress(info.value, hour, step)
+                if response.status not in (429, 502, 503, 504) or attempt == 2:
+                    return response
+                reason = f'HTTP {response.status}'
+            except PlaywrightTimeoutError:
+                if attempt == 2:
+                    raise
+                reason = '조회 시간 초과'
+            delay = 2 ** (attempt + 1)
+            self.logger.warning(f"[{hour}시 탭] [RETRY] {step}: {reason}, {delay}초 후 조회 재시도 ({attempt + 2}/3)")
+            await asyncio.sleep(delay)
+
+    async def read_json_response(self, response, step, timeout=None):
         if not response.ok:
             raise RuntimeError(f"{step} HTTP 오류: {response.status}")
         try:
-            data = await asyncio.wait_for(response.json(), timeout=6)
+            data = await asyncio.wait_for(response.json(), timeout=timeout or self.site_timeout_ms / 1000)
         except Exception as error:
             raise RuntimeError(f"{step} JSON 응답을 확인할 수 없습니다.") from error
         if not isinstance(data, dict):
@@ -328,7 +373,7 @@ class CosmaxAutomation:
         """가려진 버튼을 우회하지 않고 사이트의 정상 클릭 경로로 진행한다."""
         await self.check_site_notice(page, hour, step)
         try:
-            await page.locator(selector).click(timeout=6000)
+            await page.locator(selector).click(timeout=self.site_timeout_ms)
         except Exception:
             await self.check_site_notice(page, hour, step)
             raise
@@ -353,30 +398,31 @@ class CosmaxAutomation:
         step = "자급자재 창 열기"
         try:
             main_rows = page.locator('#ly_popInreservationMain_itemList tr[id]')
-            main_count_before = await main_rows.count()
-            expected_main_count = main_count_before + 3
+            main_rows_before = await main_rows.count()
+            main_count_before = await self.read_material_count(page, hour)
+            limit = await self.validate_material_limit(page, hour, main_count_before)
+            remaining = limit - main_count_before
+            if remaining == 0:
+                self.logger.info(f"[{hour}시 탭] 품목 수 한도 도달: 기존 {main_count_before}개 / 허용 {limit}개. 추가·저장 생략")
+                return 0
             await self.click_reservation_button(
                 page, hour, "#ly_popInreservationMain_btnSelfAdd", step
             )
-            await page.locator("#ly_popInreservationSelf").wait_for(state="visible", timeout=6000)
+            await page.locator("#ly_popInreservationSelf").wait_for(state="visible", timeout=self.site_timeout_ms)
             await self.check_site_notice(page, hour, step)
             await self.save_stage_screenshot(page, hour, 3, "self_material_modal_opened")
 
             step = "자급자재 조회"
-            async with page.expect_response(
+            response = await self.query_response(
+                page, hour, '#ly_popInreservationSelf_btnSelect', step,
                 lambda response: response.request.method == "POST"
-                and response.url.split("?", 1)[0].endswith("/selectMMIF0015List.do"),
-                timeout=6000,
-            ) as response_info:
-                await self.click_reservation_button(
-                    page, hour, "#ly_popInreservationSelf_btnSelect", step
-                )
-            response = await response_info.value
+                and response.url.split("?", 1)[0].endswith("/selectMMIF0015List.do")
+            )
             self.logger.info(f"[{hour}시 탭] 자급자재 조회 응답: HTTP {response.status}")
             if not response.ok:
                 raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 HTTP 오류: {response.status}")
             try:
-                data = await asyncio.wait_for(response.json(), timeout=6)
+                data = await asyncio.wait_for(response.json(), timeout=self.site_timeout_ms / 1000)
             except asyncio.TimeoutError as error:
                 raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 응답 본문 수신 시간이 초과되었습니다.") from error
             except Exception as error:
@@ -398,30 +444,40 @@ class CosmaxAutomation:
                 const loading = document.getElementById('load_ly_popInreservationSelf_itemList');
                 return (!loading || !loading.getClientRects().length)
                     && Boolean(document.querySelector('#ly_popInreservationSelf_itemList tr[id] input[type="checkbox"]'));
-            }""", timeout=6000)
+            }""", timeout=self.site_timeout_ms)
             await self.check_site_notice(page, hour, step)
             await self.save_stage_screenshot(page, hour, 4, "self_materials_loaded")
 
             step = "자급자재 품목 선택"
             table = page.locator("#ly_popInreservationSelf_itemList")
             checked_count = await table.locator('input[type="checkbox"]:checked').count()
-            expected_count = checked_count + 3
             eligible = table.locator(
                 'tr[id]:has(td[aria-describedby="ly_popInreservationSelf_itemList_grctrl"]:text-is("O")) '
                 'input[type="checkbox"]:enabled:not(:checked)'
             )
             count = await eligible.count()
-            if count < 3:
-                raise RuntimeError(f"[{hour}시 탭] 미선택 납품허용 자급자재가 3개 미만입니다. (추가 선택 가능: {count}개, 기존 선택: {checked_count}개)")
-            for _ in range(3):
+            add_count = min(3, remaining, count)
+            if add_count == 0:
+                raise RuntimeError(f"[{hour}시 탭] 추가 가능한 미선택 납품허용 자급자재가 없습니다. (기존 {main_count_before}개 / 허용 {limit}개)")
+            # 일반품목(C2)은 사이트의 소품목 상한보다 많아야 한다.
+            minimum_field = page.locator('#ly_popInreservationMain_itemcntLimitC3')
+            minimum_text = (await minimum_field.input_value(timeout=self.site_timeout_ms)).strip()
+            if not minimum_text.isascii() or not minimum_text.isdigit():
+                raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량을 확인하지 못했습니다. 저장 생략")
+            expected_main_count = main_rows_before + add_count
+            if main_count_before + add_count <= int(minimum_text):
+                raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량 미달: 추가 후 {main_count_before + add_count}개 / 최소 {int(minimum_text) + 1}개. 저장 생략")
+            expected_count = checked_count + add_count
+            self.logger.info(f"[{hour}시 탭] 자동 선택 계산: 기존 {main_count_before}개 / 허용 {limit}개 / 선택 가능 {count}개 → 신규 {add_count}개")
+            for _ in range(add_count):
                 await self.check_site_notice(page, hour, step)
                 # 체크하면 후보에서 빠지므로 매번 첫 번째 미선택 항목을 선택한다.
-                await eligible.first.check(timeout=6000)
+                await eligible.first.check(timeout=self.site_timeout_ms)
             await self.check_site_notice(page, hour, step)
             if await table.locator('input[type="checkbox"]:checked').count() != expected_count:
                 raise RuntimeError(f"[{hour}시 탭] 선택 자재 수가 기대값 {expected_count}개와 다릅니다.")
-            self.logger.info(f"[{hour}시 탭] 기존 선택 {checked_count}개 유지, 납품허용 자급자재 3개 추가 선택 완료 (총 {expected_count}개)")
-            await self.save_stage_screenshot(page, hour, 5, "three_materials_selected")
+            self.logger.info(f"[{hour}시 탭] 기존 선택 {checked_count}개 유지, 납품허용 자급자재 {add_count}개 추가 선택 완료 (총 {expected_count}개)")
+            await self.save_stage_screenshot(page, hour, 5, "materials_selected")
 
             step = "선택 자급자재 추가"
             await self.click_reservation_button(
@@ -433,19 +489,52 @@ class CosmaxAutomation:
                 const subModal = document.getElementById('ly_popInreservationSelf');
                 const rows = document.querySelectorAll('#ly_popInreservationMain_itemList tr[id]');
                 return subModal && !subModal.getClientRects().length && rows.length >= expectedCount;
-            }""", arg=expected_main_count, timeout=6000)
+            }""", arg=expected_main_count, timeout=self.site_timeout_ms)
             await self.check_site_notice(page, hour, step)
-            main_count_after = await main_rows.count()
-            if main_count_after != expected_main_count:
-                raise RuntimeError(f"[{hour}시 탭] 자급자재 추가 확인 실패: 메인 기존 {main_count_before}개 + 신규 3개, 실제 {main_count_after}개")
-            self.logger.info(f"[{hour}시 탭] 메인 예약창 자급자재 추가 완료: 기존 {main_count_before}개 + 신규 3개 = 총 {main_count_after}개")
+            main_rows_after = await main_rows.count()
+            if main_rows_after != expected_main_count:
+                raise RuntimeError(f"[{hour}시 탭] 자급자재 추가 확인 실패: 기존 {main_rows_before}행 + 신규 {add_count}행, 실제 {main_rows_after}행")
+            main_count_after = await self.read_material_count(page, hour)
+            if main_count_after <= int(minimum_text):
+                raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량 미달: 현재 {main_count_after}개 / 최소 {int(minimum_text) + 1}개. 저장 생략")
+            self.logger.info(f"[{hour}시 탭] 메인 예약창 자급자재 추가 완료: 기존 종목 {main_count_before}개 / 체크박스 {add_count}개 추가 / 현재 종목 {main_count_after}개")
             await self.save_stage_screenshot(page, hour, 6, "materials_added_to_main")
+            return add_count
         except Exception:
             await self.check_site_notice(page, hour, step)
             raise
         finally:
             page.remove_listener("requestfailed", log_failed_request)
             page.remove_listener("response", log_error_response)
+
+    async def read_material_count(self, page, hour):
+        """목록 행 수와 종목 수는 다를 수 있으므로 사이트 표시값을 읽는다."""
+        try:
+            await page.wait_for_function("""() => {
+                const input = document.querySelector('#ly_popInreservationMain_itemcntTotal');
+                return input && /^[0-9]+$/.test(input.value.trim());
+            }""", timeout=self.site_timeout_ms)
+            return int(await page.locator('#ly_popInreservationMain_itemcntTotal').input_value())
+        except Exception as error:
+            raise RuntimeError(f"[{hour}시 탭] 현재 종목 수를 확인하지 못했습니다. 저장 생략") from error
+
+    async def validate_material_limit(self, page, hour, count):
+        """사이트가 조회한 시간대별 한도로 검사한다. 한도를 추측하지 않는다."""
+        try:
+            await page.wait_for_function("""() => {
+                const input = document.querySelector('#ly_popInreservationMain_itemcntLimit');
+                return input && /^[0-9]+$/.test(input.value.trim()) && Number(input.value) > 0;
+            }""", timeout=self.site_timeout_ms)
+            limit = int(await page.locator('#ly_popInreservationMain_itemcntLimit').input_value())
+        except Exception as error:
+            raise RuntimeError(f"[{hour}시 탭] 품목 수 허용 한도를 확인하지 못했습니다. 저장 생략") from error
+        if count > limit:
+            raise RuntimeError(
+                f"[{hour}시 탭] {hour:02d}:00 시간의 품목 수 제한을 초과 했습니다. "
+                f"(현재 종목 {count}개 / 허용 {limit}개). 저장 생략"
+            )
+        self.logger.info(f"[{hour}시 탭] 품목 수 한도 확인: 현재 {count}개 / 허용 {limit}개")
+        return limit
 
     async def validate_reservation_form(self, page, hour, day, col_arg):
         if await page.locator('#srchReservDay').input_value() != day:
@@ -458,27 +547,25 @@ class CosmaxAutomation:
 
     async def load_existing_materials(self, page, hour, seq):
         """기존 예약 품목을 먼저 읽어 자급자재 조회 시 기존 체크가 반영되게 한다."""
-        async with page.expect_response(
+        response = await self.query_response(
+            page, hour, '#ly_popInreservationMain_btnSelect', '기존 예약 품목 조회',
             lambda r: r.request.method == 'POST'
             and urlsplit(r.url).path.endswith('/selectInReservationItemListNew.do')
-            and parse_qs(r.request.post_data or '').get('srchSeq') == [seq],
-            timeout=6000,
-        ) as info:
-            await self.click_reservation_button(page, hour, '#ly_popInreservationMain_btnSelect', '기존 예약 품목 조회')
-        data = await self.read_json_response(await info.value, '기존 예약 품목 조회')
+            and parse_qs(r.request.post_data or '').get('srchSeq') == [seq]
+        )
+        data = await self.read_json_response(response, '기존 예약 품목 조회')
         if data.get('returnCode') in ('FAIL', 'NOSES') or not isinstance(data.get('rows'), list):
             raise RuntimeError(f"[{hour}시 탭] 기존 예약 품목 조회 실패: {data.get('returnMessage', '')}")
         await page.wait_for_function("""(count) => {
             const loading = document.querySelector('#load_ly_popInreservationMain_itemList');
             return (!loading || !loading.getClientRects().length)
                 && document.querySelectorAll('#ly_popInreservationMain_itemList tr[id]').length === count;
-        }""", arg=len(data['rows']), timeout=6000)
+        }""", arg=len(data['rows']), timeout=self.site_timeout_ms)
         await self.check_site_notice(page, hour, '기존 예약 품목 조회')
-        self.logger.info(f"[{hour}시 탭] 기존 예약번호 {seq}: 품목 {len(data['rows'])}개 조회 완료, 추가 선택 진행")
+        self.logger.info(f"[{hour}시 탭] 기존 예약번호 {seq}: 자재 목록 {len(data['rows'])}행 조회 완료, 화면 종목 수로 추가 가능 여부 확인")
 
     async def reserve_single_slot(self, page, hour: int):
         tab_label = f"{hour}시 탭"
-        col_arg = str({8: 1, 9: 2, 10: 3, 11: 4, 13: 5, 14: 6, 15: 7}[hour])
         day = await page.locator('#srchReservDay').input_value()
         try:
             datetime.strptime(day, '%Y%m%d')
@@ -488,44 +575,75 @@ class CosmaxAutomation:
             raise RuntimeError(f"[{tab_label}] 과거 예약일: {day}")
         account = self.config.get('user_id', '')
         key = self.state.key(account, day, hour)
-        old = self.state.get(key)
-        if not self.config.get('dry_run') and old:
-            if old['status'] in ('CONFIRMED', 'WAIT'):
-                self.logger.info(f"[{tab_label}] 기존 처리 기록 유지: {old['status']} / {day}")
-                return dict(hour=hour, day=day, **old)
-            if old['status'] == 'SUBMITTING':
-                self.logger.warning(f"[{tab_label}] 진행 중인 저장 기록 유지: SUBMITTING / {day}")
-                return dict(hour=hour, day=day, **old)
-            if old['status'] == 'UNKNOWN':
-                self.logger.info(f"[{tab_label}] 이전 UNKNOWN 기록을 재시도합니다: {old['detail']}")
+        dry_run = self.config.get('dry_run', False)
+        previous = None
+        if not dry_run:
+            try:
+                # 같은 슬롯의 조회부터 저장까지 한 실행만 소유한다. 다른 시간대는 별개 키다.
+                previous = self.state.claim(key, allow_completed=True)
+            except RuntimeError:
+                active = self.state.get(key)
+                if active and active['status'] == 'SUBMITTING':
+                    detail = '같은 시간대를 다른 실행이 처리 중이므로 이번 실행 생략'
+                    self.logger.warning(f"[{tab_label}] [SUBMITTING] {detail}")
+                    return dict(hour=hour, day=day, status='SUBMITTING', detail=detail)
+                raise
+            self.submitted_hours.discard(hour)
+            if previous:
+                self.logger.info(f"[{tab_label}] 이전 기록 {previous['status']} / {day}: 현재 체크박스와 품목 수를 다시 확인합니다")
+        try:
+            return await self.reserve_open_slot(page, hour, day, key)
+        finally:
+            if not dry_run and hour not in self.submitted_hours:
+                self.state.release(key, previous)
+
+    async def reserve_open_slot(self, page, hour, day, key):
+        tab_label = f"{hour}시 탭"
+        col_arg = str({8: 1, 9: 2, 10: 3, 11: 4, 13: 5, 14: 6, 15: 7}[hour])
         row = page.locator('table#list tr[id="1"]')
         warehouse = await row.locator('[aria-describedby="list_facgubn"]').text_content()
         if warehouse.strip() != '1':
             raise RuntimeError(f"[{tab_label}] 예약 행의 창고가 청북2층이 아닙니다.")
         checkbox = row.locator(f'td[aria-describedby="list_checkYn{col_arg}"] input[type="checkbox"]')
+        open_button = row.locator(f'td[aria-describedby="list_cobut{col_arg}"] a')
+        async def slot_available():
+            return (await checkbox.count() and await checkbox.is_enabled()
+                    and await open_button.count() and await open_button.is_visible())
+        query_pending = False
+        poll_delay = 1
         try:
-            async with asyncio.timeout(self.config.get('grid_wait_timeout_seconds', 5)):
-                while not (await checkbox.count() and await checkbox.is_enabled()):
+            async with asyncio.timeout(self.config.get('grid_wait_timeout_seconds', 60)):
+                while not await slot_available():
                     await self.check_site_notice(page, hour, '시간대 활성화 대기')
+                    query_pending = True
                     await self.refresh_reservation_list(page, hour)
-                    await asyncio.sleep(0.1)
+                    query_pending = False
+                    if await slot_available():
+                        break
+                    self.logger.info(f"[{tab_label}] 시간대 활성화 대기: {poll_delay}초 후 목록 재조회")
+                    await asyncio.sleep(poll_delay)
+                    poll_delay = min(poll_delay * 2, 4)
         except TimeoutError as error:
+            if query_pending:
+                raise RuntimeError(f"[{tab_label}] 예약 목록 조회 지연으로 대기 한도에 도달했습니다. 마감 여부 미확인") from error
             raise RuntimeError(f"[{tab_label}] 대상 시간대 체크박스가 활성화되지 않았습니다. (마감 또는 미오픈)") from error
         seq = (await row.locator(f'[aria-describedby="list_seq{col_arg}"]').text_content()).strip()
         existing_reservation = bool(seq and seq != '0')
-        await checkbox.check(timeout=6000)
+        await checkbox.check(timeout=self.site_timeout_ms)
         await self.save_stage_screenshot(page, hour, 1, "slot_selected")
         await self.click_reservation_button(
             page, hour, f'table#list tr[id="1"] td[aria-describedby="list_cobut{col_arg}"] a', '예약 창 열기'
         )
-        await page.locator('#ly_popInreservationMain').wait_for(state='visible', timeout=6000)
+        await page.locator('#ly_popInreservationMain').wait_for(state='visible', timeout=self.site_timeout_ms)
         await self.validate_reservation_form(page, hour, day, col_arg)
         if existing_reservation:
             await self.load_existing_materials(page, hour, seq)
         await self.save_stage_screenshot(page, hour, 2, "main_modal_opened")
 
         # 3~6. 실제 팝업 표시와 조회 완료를 확인하며 자급자재를 추가한다.
-        await self.add_self_materials(page, hour)
+        added_count = await self.add_self_materials(page, hour)
+        if added_count == 0:
+            return dict(hour=hour, day=day, status='NO_CHANGE', detail='품목 수가 허용 한도에 도달하여 추가·저장 생략')
 
         # 7. 실제 입력란에 수량을 입력하고 change 이벤트가 발생하도록 포커스를 이동한다.
         await self.check_site_notice(page, hour, "수량 입력")
@@ -533,34 +651,63 @@ class CosmaxAutomation:
             control = page.locator(f"#ly_popInreservationMain_{field}")
             if existing_reservation and (await control.input_value()).strip():
                 continue
-            await control.fill("1", timeout=6000)
+            await control.fill("1", timeout=self.site_timeout_ms)
             await control.press("Tab")
         await self.check_site_notice(page, hour, "수량 입력")
         await self.save_stage_screenshot(page, hour, 7, "quantities_entered")
 
         await self.validate_reservation_form(page, hour, day, col_arg)
+        await self.validate_material_limit(
+            page, hour, await self.read_material_count(page, hour)
+        )
         if self.config.get('dry_run'):
-            self.logger.info(f"[{tab_label}] [DRY_RUN] {day} / {hour}시 / 청북2층 / 일반품목 / 기존 선택 유지 및 자재 3개 추가 검증 완료. 저장 생략")
+            self.logger.info(f"[{tab_label}] [DRY_RUN] {day} / {hour}시 / 청북2층 / 일반품목 / 기존 선택 유지 및 자재 {added_count}개 추가 검증 완료. 저장 생략")
             return dict(hour=hour, day=day, status='DRY_RUN')
 
-        self.state.claim(key)
         self.submitted_hours.add(hour)
         result = dict(hour=hour, day=day, status='UNKNOWN', detail='저장 결과 확인 필요')
         responses = []
+        self.browser_alerts[hour] = []
+        save_requested = False
+        rejection_signal = asyncio.get_running_loop().create_future()
+        def track_request(request):
+            nonlocal save_requested
+            if request.method == 'POST' and urlsplit(request.url).path.endswith('/saveInReservationItemListNew.do'):
+                save_requested = True
         def collect(response):
             if response.request.method == 'POST' and urlsplit(response.url).path.endswith('/saveInReservationWait.do'):
                 responses.append(response)
+        def detect_rejection(dialog):
+            message = ' '.join(dialog.message.split())
+            if (dialog.type == 'alert' and not save_requested and not rejection_signal.done()
+                    and '품목 수 제한' in message and ('초과' in message or '미달' in message)):
+                rejection_signal.set_result(message)
+        async def response_or_rejection(awaitable):
+            response_task = asyncio.ensure_future(awaitable)
+            try:
+                done, _ = await asyncio.wait({response_task, rejection_signal}, return_when=asyncio.FIRST_COMPLETED)
+                if response_task in done:
+                    return await response_task
+                raise RuntimeError(rejection_signal.result())
+            finally:
+                if not response_task.done():
+                    response_task.cancel()
+                await asyncio.gather(response_task, return_exceptions=True)
         page.on('response', collect)
+        page.on('request', track_request)
+        page.on('dialog', detect_rejection)
         try:
             async with page.expect_response(
                 lambda r: r.request.method == 'POST' and urlsplit(r.url).path.endswith('/saveInReservationItemListNew.do'),
-                timeout=12000
+                timeout=self.save_timeout_seconds * 1000
             ) as info:
                 # 이후 성공 안내도 lyNoti를 쓰므로 클릭 직후의 일반 오류 검사는 하지 않는다.
                 await self.check_site_notice(page, hour, '예약 저장 전')
-                await page.locator('#ly_popInreservationMain_btnSave').click(timeout=6000)
-            response = await info.value
-            data = await self.read_json_response(response, '예약 저장')
+                await page.locator('#ly_popInreservationMain_btnSave').click(timeout=self.site_timeout_ms)
+                response = await self.wait_with_progress(response_or_rejection(info.value), hour, '예약 저장 응답')
+            data = await self.wait_with_progress(
+                self.read_json_response(response, '예약 저장', self.save_timeout_seconds), hour, '예약 저장 응답 본문'
+            )
             code = data.get('returnCode')
             self.logger.info(f"[{tab_label}] 저장 응답: {code} / {data.get('returnMessage', '')}")
             if code not in ('SUCCESS', 'WAIT'):
@@ -571,12 +718,18 @@ class CosmaxAutomation:
             if code == 'WAIT':
                 wait_data = data.get('returnCosmaxData') or {}
                 if not (wait_data.get('seq') and wait_data.get('seq') == wait_data.get('waitSeq')):
-                    deadline = asyncio.get_running_loop().time() + 12
+                    deadline = asyncio.get_running_loop().time() + self.save_timeout_seconds
+                    next_log = asyncio.get_running_loop().time() + 10
                     while not responses:
                         if asyncio.get_running_loop().time() >= deadline:
                             raise RuntimeError('대기 등록 후속 저장 응답 미확인')
+                        if asyncio.get_running_loop().time() >= next_log:
+                            self.logger.warning(f"[{tab_label}] [WAITING] 대기 등록 후속 응답 지연, 재저장 없이 계속 대기")
+                            next_log += 10
                         await asyncio.sleep(0.05)
-                    followup = await self.read_json_response(responses[0], '대기 등록')
+                    followup = await self.wait_with_progress(
+                        self.read_json_response(responses[0], '대기 등록', self.save_timeout_seconds), hour, '대기 등록 응답 본문'
+                    )
                     if followup.get('returnCode') != 'SUCCESS':
                         raise RuntimeError(f"대기 등록 실패: {followup.get('returnMessage', '')}")
                 status = 'WAIT'
@@ -584,14 +737,14 @@ class CosmaxAutomation:
             await page.wait_for_function("""() => {
                 const el=document.querySelector('#lyNoti');
                 return el && el.getClientRects().length && (el.textContent.includes('등록') || el.textContent.includes('확정'));
-            }""", timeout=6000)
+            }""", timeout=self.site_timeout_ms)
             notice_text = await page.locator('#lyNoti').text_content()
             self.logger.info(f"[{tab_label}] 저장 완료 안내: {notice_text.strip()}")
             await self.save_stage_screenshot(page, hour, 8, 'save_notice')
             expected = '입고 예약이 확정' if status == 'CONFIRMED' else '입고예약 대기'
             if expected not in notice_text or f'[{hour:02d}:00]' not in notice_text:
                 raise RuntimeError(f'예상하지 않은 저장 알림: {notice_text}')
-            await page.locator('#lyNoti .pop_btnclose').click(timeout=6000)
+            await page.locator('#lyNoti .pop_btnclose').click(timeout=self.site_timeout_ms)
             active_tab = await page.locator('.tabWrap ul li.active a').get_attribute('id')
             if active_tab != ('atab1' if status == 'CONFIRMED' else 'atab2'):
                 raise RuntimeError('저장 후 확정/대기 목록 탭이 예상과 다릅니다.')
@@ -608,12 +761,22 @@ class CosmaxAutomation:
             self.logger.info(f"[{tab_label}] [{status}] {day} {hour}시 {result['detail']}")
             return result
         except Exception as error:
-            result['detail'] = str(error)
-            self.logger.error(f"[{tab_label}] [UNKNOWN] {error}. 이번 실행에서는 추가 저장하지 않습니다.")
-            await self.capture_failure_screenshot(page, error, '저장_결과_미확인', hour)
+            alerts = self.browser_alerts.get(hour, [])
+            rejection = next((message for message in alerts
+                              if '품목 수 제한' in message and ('초과' in message or '미달' in message)), None)
+            if rejection and not save_requested:
+                result.update(status='FAILED', detail=f'{rejection} / 저장 요청 미전송')
+            else:
+                result['detail'] = (f"브라우저 경고: {' / '.join(alerts)} / " if alerts else '') + str(error)
+            self.logger.error(f"[{tab_label}] [{result['status']}] {result['detail']}. 이번 실행에서는 추가 저장하지 않습니다.")
+            failure = RuntimeError(result['detail']).with_traceback(error.__traceback__)
+            await self.capture_failure_screenshot(page, failure, '예약_저장', hour)
             return result
         finally:
             page.remove_listener('response', collect)
+            page.remove_listener('request', track_request)
+            page.remove_listener('dialog', detect_rejection)
+            rejection_signal.cancel()
             self.state.finish(key, result['status'], result['detail'])
             await self.save_stage_screenshot(page, hour, 9, 'reservation_result')
 
@@ -655,6 +818,8 @@ async def execute_automation(config: dict, logger: logging.Logger):
             elif config.get('record_video'):
                 logger.info("headless=true이므로 동영상 녹화를 생략합니다.")
             context = await browser.new_context(**context_options)
+            context.set_default_timeout(automation.site_timeout_ms)
+            context.set_default_navigation_timeout(automation.site_timeout_ms)
 
             # 리소스 차단 (웹폰트 및 불필요 미디어 차단으로 탭 3개 로딩 및 메모리 최적화)
             async def route_filter(route):
@@ -683,63 +848,44 @@ async def execute_automation(config: dict, logger: logging.Logger):
                 tabs.append((hr, tab_page))
                 await automation.set_maximized(context, tab_page)
 
-            # 4. 각 탭 사전 준비 (예약 페이지 이동 + [지류]청북2층 선택 + dialog 자동 승인)
-            logger.info("======================================================================")
-            logger.info(f"⚡ [Step 5] {len(target_hours)}개 탭({target_hours}) 예약 페이지 사전 접속 및 위치 선택 병렬 준비...")
-            logger.info("======================================================================")
-            prep_tasks = [
-                automation.prepare_reservation_tab(page_obj, hr)
-                for hr, page_obj in tabs
-            ]
-            prep_results = await asyncio.gather(*prep_tasks, return_exceptions=True)
-            ready_tabs = []
-            prep_failed_errors = []
-            for (hr, page_obj), result in zip(tabs, prep_results):
+            # 시간대별로 준비 → 목표 시각 대기 → 예약 → 결과 기록을 독립 수행한다.
+            logger.info(f"[Step 5] 시간대 {target_hours} 독립 실행 시작")
+            ready_hours = set()
+            prep_errors = []
+
+            async def run_tab(hour, page):
+                phase = '사전_준비'
+                try:
+                    await automation.prepare_reservation_tab(page, hour)
+                    ready_hours.add(hour)
+                    phase = '목표_시각_대기'
+                    if not config.get('dry_run'):
+                        logger.info(f"[{hour}시 탭] [Step 6] 목표 시각 {config.get('target_time')} 대기")
+                        await automation.wait_until_target_time(page)
+                    phase = '예약_처리'
+                    logger.info(f"[{hour}시 탭] [Step 7] 현재 시간대 예약 처리 시작")
+                    result = await automation.reserve_single_slot(page, hour)
+                except Exception as error:
+                    if phase == '사전_준비':
+                        prep_errors.append(error)
+                    await automation.capture_failure_screenshot(page, error, phase, hour)
+                    result = dict(hour=hour, status='UNKNOWN' if hour in automation.submitted_hours else 'FAILED',
+                                  detail=str(error))
+                # 다른 탭의 대기/실패와 관계없이 해당 탭 결과를 즉시 기록한다.
+                logger.info(f"[{hour}시 탭] [RESULT] {result}")
+                await automation.save_final_screenshot(page, hour)
+                return result
+
+            results = await asyncio.gather(*(run_tab(hour, page) for hour, page in tabs), return_exceptions=True)
+            outcomes = []
+            for (hour, _), result in zip(tabs, results):
                 if isinstance(result, Exception):
-                    logger.error(f"❌ [{hr}시 탭] 사전 준비 실패: {result}")
-                    await automation.capture_failure_screenshot(page_obj, result, "사전_준비", hour=hr)
-                    prep_failed_errors.append((hr, result))
-                else:
-                    ready_tabs.append((hr, page_obj))
-
-            if not ready_tabs:
-                first_hr, first_error = prep_failed_errors[0]
-                raise RuntimeError(f"모든 시간대({target_hours}) 사전 준비 실패: {prep_failed_errors}") from first_error
-
-            logger.info(
-                f"★ 사전 준비 완료 탭: {[hr for hr, _ in ready_tabs]} | "
-                f"사전 준비 실패 탭: {[hr for hr, _ in prep_failed_errors]}"
-            )
-
-            # 5. 서버 시계 기준 목표 시각(10:00:00)까지 세션 유지 대기
-            logger.info("======================================================================")
-            logger.info(f"[Step 6] 목표 시각 {config.get('target_time')} 대기 (dry_run이면 생략)")
-            logger.info("======================================================================")
-            if not config.get("dry_run"):
-                await automation.wait_until_target_time(ready_tabs[0][1])
-
-            # 6. 정각 도달: 3개 탭 동시 비동기 병렬 예약 실행 (asyncio.gather)
-            logger.info("======================================================================")
-            ready_hours_text = ", ".join(f"{hr}시" for hr, _ in ready_tabs)
-            logger.info(f"🚀 [Step 7] {ready_hours_text} 탭 비동기 병렬 동시 예약 트리거! (asyncio.gather)")
-            logger.info("======================================================================")
-            reserve_tasks = [
-                automation.reserve_single_slot(page_obj, hr)
-                for hr, page_obj in ready_tabs
-            ]
-
-            # 1개 탭의 실패가 다른 탭에 영향을 주지 않도록 return_exceptions=True 적용
-            results = await asyncio.gather(*reserve_tasks, return_exceptions=True)
-
-            outcomes = [dict(hour=hr, status='FAILED', detail=str(error)) for hr, error in prep_failed_errors]
-            for (hr, page_obj), result in zip(ready_tabs, results):
-                if isinstance(result, Exception):
-                    await automation.capture_failure_screenshot(page_obj, result, '예약_처리', hour=hr)
-                    result = dict(hour=hr, status='UNKNOWN' if hr in automation.submitted_hours else 'FAILED', detail=str(result))
+                    logger.error(f"[{hour}시 탭] 결과 기록 실패: {result}")
+                    result = dict(hour=hour, status='UNKNOWN' if hour in automation.submitted_hours else 'FAILED',
+                                  detail=str(result))
                 outcomes.append(result)
-                logger.info(f"[{hr}시 탭] [RESULT] {result}")
-            for hr, page_obj in ready_tabs:
-                await automation.save_final_screenshot(page_obj, hr)
+            if not ready_hours and prep_errors:
+                raise RuntimeError(f"모든 시간대({target_hours}) 사전 준비 실패: {prep_errors}") from prep_errors[0]
             return outcomes
 
         except Exception as exc:

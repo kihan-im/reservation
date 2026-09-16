@@ -36,6 +36,9 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
 <button id="ly_popInreservationMain_btnSelfAdd">자급자재 추가</button>
 <button id="ly_popInreservationMain_btnSelect">기존 품목 조회</button>
 <table id="ly_popInreservationMain_itemList"></table>
+<input id="ly_popInreservationMain_itemcntLimit" value="8">
+<input id="ly_popInreservationMain_itemcntTotal" value="0">
+<input id="ly_popInreservationMain_itemcntLimitC3" value="2">
 <input id="ly_popInreservationMain_paletteTotal"><input id="ly_popInreservationMain_carTotal">
 <button id="ly_popInreservationMain_btnSave">저장</button></div>
 <div id="ly_popInreservationSelf">
@@ -58,6 +61,7 @@ document.getElementById('ly_popInreservationMain_btnSelect').onclick = async () 
  const response = await fetch('/selectInReservationItemListNew.do', {method:'POST',body:'srchSeq='+seq});
  const data = await response.json();
  document.getElementById('ly_popInreservationMain_itemList').innerHTML=(data.rows || []).map((r,i)=>`<tr id="existing${i}"><td>O</td></tr>`).join('');
+ document.getElementById('ly_popInreservationMain_itemcntTotal').value=data.itemCount ?? (data.rows || []).length;
 };
 document.getElementById('ly_popInreservationMain_btnSelfAdd').onclick = e => {
  record(e,'open'); if (!e.isTrusted) return;
@@ -80,6 +84,7 @@ document.getElementById('ly_popInreservationSelf_btnAdd').onclick = e => {
  // 실제 사이트처럼 기존 메인 품목은 유지하고, 기존 체크와 중복되지 않는 신규 품목만 병합한다.
  const selected=Array.from(grid.querySelectorAll('tr')).filter(r=>r.querySelector('input').checked && r.dataset.existing !== 'true');
  document.getElementById('ly_popInreservationMain_itemList').insertAdjacentHTML('beforeend', selected.map((r,i)=>`<tr id="main${i}"><td>${r.textContent}</td></tr>`).join(''));
+ document.getElementById('ly_popInreservationMain_itemcntTotal').value=document.querySelectorAll('#ly_popInreservationMain_itemList tr[id]').length;
  sub.style.display='none'; window.added=true;
 };
 document.getElementById('ly_popInreservationMain_btnSave').onclick = async e => {
@@ -117,9 +122,15 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.list_data = {"rows":[{"facgubn":"1", "comptype":"C2", "colink5":"102190", "seq5":"12345"}]}
         self.existing_data = {"rows":[{}, {}, {}]}
         self.requests = []
+        self.query_statuses = []
+        self.query_delays = []
+        self.save_delay = 0
         await self.page.route("**/*", self.route)
         await self.page.goto("https://cip.test/")
-        self.automation = CosmaxAutomation({"log_dir": self.tmp.name}, logging.getLogger("popup-test"))
+        self.automation = CosmaxAutomation(
+            {"log_dir": self.tmp.name, 'site_timeout_seconds': 1, 'save_timeout_seconds': 1},
+            logging.getLogger("popup-test")
+        )
 
     async def route(self, route):
         path = route.request.url.split("cip.test", 1)[-1]
@@ -131,11 +142,14 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await route.fulfill(status=self.status, content_type="application/json",
                                 body=self.raw_body if self.raw_body is not None else json.dumps(self.data))
         elif path == "/saveInReservationItemListNew.do":
+            await asyncio.sleep(self.save_delay)
             await route.fulfill(content_type="application/json", status=self.save_status, body=json.dumps(self.save_data))
         elif path == "/saveInReservationWait.do":
             await route.fulfill(content_type="application/json", body=json.dumps(self.wait_data))
         elif path == "/selectInreservationListNew.do":
-            await route.fulfill(content_type="application/json", body=json.dumps(self.list_data))
+            await asyncio.sleep(self.query_delays.pop(0) if self.query_delays else 0)
+            await route.fulfill(status=self.query_statuses.pop(0) if self.query_statuses else 200,
+                                content_type="application/json", body=json.dumps(self.list_data))
         elif path == "/selectInReservationItemListNew.do":
             await route.fulfill(content_type="application/json", body=json.dumps(self.existing_data))
         else:
@@ -296,10 +310,10 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_ineligible_material_is_not_selected(self):
         self.data['rows'] = [{'allowed':'X'}, {'allowed':'O'}, {'allowed':'O'}]
-        await self.assert_stops_before_save('납품허용 자급자재가 3개 미만')
+        await self.assert_stops_before_save('일반품목 최소 수량 미달')
         self.assertEqual(await self.page.locator('#ly_popInreservationSelf_itemList input:checked').count(), 0)
 
-    async def test_existing_checks_are_kept_and_three_unchecked_allowed_rows_are_added(self):
+    async def test_existing_checks_are_kept_and_only_eligible_rows_fill_capacity(self):
         await self.page.locator('#ly_popInreservationMain_itemList').evaluate(
             "el=>el.innerHTML=Array.from({length:3},(_,i)=>`<tr id='existing${i}'><td>기존</td></tr>`).join('')"
         )
@@ -323,14 +337,16 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected, ['row1','row2','row3','row5','row7','row8'])
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr').count(), 6)
 
-    async def test_too_few_unchecked_allowed_rows_preserves_existing_selection(self):
+    async def test_two_remaining_eligible_rows_are_added_to_existing_materials(self):
+        await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
         self.data['rows'] = [{'allowed':'O', 'checked':True}] * 3 + [{'allowed':'O'}] * 2
-        await self.assert_stops_before_save('미선택 납품허용 자급자재가 3개 미만')
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
         selected = await self.page.locator('#ly_popInreservationSelf_itemList tr:has(input:checked)').evaluate_all(
             'rows=>rows.map(row=>row.id)'
         )
-        self.assertEqual(selected, ['row0','row1','row2'])
-        self.assertFalse(await self.page.evaluate('window.added'))
+        self.assertEqual(selected, ['row0','row1','row2','row3','row4'])
+        self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr').count(), 5)
 
     async def test_add_notice_stops_before_save(self):
         await self.page.evaluate('window.rejectAdd=true')
@@ -368,7 +384,11 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again['status'], 'CONFIRMED')
         self.assertTrue(await self.page.locator('[aria-describedby="list_checkYn5"] input').is_checked())
         self.assertEqual(before + 1, self.requests.count('/saveInReservationItemListNew.do'))
-        await self.automation.reserve_single_slot(self.page, 13)
+        await self.page.reload()
+        await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
+        self.existing_data = {'rows': [{}] * 8}
+        final = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(final['status'], 'NO_CHANGE')
         self.assertEqual(before + 1, self.requests.count('/saveInReservationItemListNew.do'))
 
     async def test_submitting_record_still_blocks_parallel_save(self):
@@ -400,11 +420,34 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr').count(), 6)
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_paletteTotal').input_value(), '30')
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_carTotal').input_value(), '2')
-        # The same automation result still cannot be submitted again on a rerun.
+        # 이전 성공 기록이 있어도 현재 서버 품목 수를 조회하고 한도에 도달했으면 저장하지 않는다.
         before = self.requests.count('/saveInReservationItemListNew.do')
+        self.existing_data = {'rows': [{}] * 8}
         again = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(again['status'], 'CONFIRMED')
+        self.assertEqual(again['status'], 'NO_CHANGE')
         self.assertEqual(before, self.requests.count('/saveInReservationItemListNew.do'))
+
+    async def test_completed_records_do_not_block_enabled_slot_with_capacity(self):
+        key = self.automation.state.key('', '20990101', 13)
+        for status in ('CONFIRMED', 'WAIT'):
+            with self.subTest(previous=status):
+                await self.page.reload()
+                self.automation.state.finish(key, status, '이전 예약번호 12345')
+                await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
+                self.existing_data = {'rows': [{}] * 6}
+                self.data['rows'] = [{'allowed':'O', 'checked':True}] * 6 + [{'allowed':'O'}] * 3
+                before = self.requests.count('/saveInReservationItemListNew.do')
+                result = await self.automation.reserve_single_slot(self.page, 13)
+                self.assertEqual(result['status'], 'CONFIRMED')
+                self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr[id]').count(), 8)
+                self.assertEqual(self.requests.count('/saveInReservationItemListNew.do'), before + 1)
+
+    async def test_pre_save_failure_releases_claim_and_preserves_previous_record(self):
+        key = self.automation.state.key('', '20990101', 13)
+        self.automation.state.finish(key, 'WAIT', '기존 대기 예약')
+        self.data['rows'] = []
+        await self.assert_stops_before_save('조회된 자급자재가 없습니다')
+        self.assertEqual(self.automation.state.get(key), {'status':'WAIT', 'detail':'기존 대기 예약'})
 
     async def test_existing_items_query_failure_stops_before_add(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
@@ -412,24 +455,105 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         await self.assert_stops_before_save('기존 품목 조회 거절')
         self.assertNotIn('/selectMMIF0015List.do', self.requests)
 
-    async def test_eight_existing_items_and_one_popup_check_reach_save_with_eleven(self):
+    async def test_eight_existing_items_skip_add_and_save(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
         self.existing_data = {'rows':[{}] * 8}
         # 조회 기간에 포함된 기존 품목은 하나뿐이어도 메인에는 기존 8개가 남아 있다.
         self.data['rows'] = [{'allowed':'O', 'checked':True}] + [{'allowed':'O'}] * 3
         result = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(result['status'], 'CONFIRMED')
-        self.assertEqual(await self.page.locator('#ly_popInreservationSelf_itemList input:checked').count(), 4)
-        self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr').count(), 11)
+        self.assertEqual(result['status'], 'NO_CHANGE')
+        self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr[id^="existing"]').count(), 8)
+        self.assertNotIn('/selectMMIF0015List.do', self.requests)
+
+    async def test_nine_rows_with_eight_displayed_items_skip_without_false_limit_error(self):
+        await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
+        self.existing_data = {'rows': [{}] * 9, 'itemCount': 8}
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'NO_CHANGE')
+        self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
+
+    async def test_remaining_capacity_controls_selection_for_empty_six_and_seven_items(self):
+        for existing, added in ((0, 3), (6, 2), (7, 1)):
+            with self.subTest(existing=existing):
+                await self.page.reload()
+                self.automation.config['dry_run'] = True
+                if existing:
+                    await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
+                self.existing_data = {'rows': [{}] * existing}
+                # 메인 전체 수와 팝업에 조회되는 기존 체크 수가 달라도 용량은 메인 기준이다.
+                self.data['rows'] = [{'allowed':'O', 'checked':True}] + [{'allowed':'O'}] * 10
+                result = await self.automation.reserve_single_slot(self.page, 13)
+                self.assertEqual(result['status'], 'DRY_RUN')
+                self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr[id]').count(), existing + added)
+                self.assertEqual(await self.page.locator('#ly_popInreservationSelf_itemList input:checked').count(), added + 1)
+        self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
+
+    async def test_exact_limit_saves_and_late_limit_change_stops_before_save(self):
+        # 현재 설정된 한도를 사용하며, 품목 추가 후 바뀐 한도도 저장 직전에 다시 확인한다.
+        await self.page.locator('#ly_popInreservationMain_itemcntLimit').evaluate("el => el.value = '3'")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        await self.page.reload()
+        self.automation.config['dry_run'] = True
+        await self.page.evaluate("""() => {
+            const button = document.getElementById('ly_popInreservationSelf_btnAdd');
+            const add = button.onclick;
+            button.onclick = e => {
+                add(e);
+                document.getElementById('ly_popInreservationMain_itemcntLimit').value = '2';
+            };
+        }""")
+        self.requests.clear()
+        await self.assert_stops_before_save('품목 수 제한.*현재 종목 3개 / 허용 2개')
+
+    async def test_limit_alert_without_save_request_is_failed_and_preserved(self):
+        message = '13:00 시간의 품목 수 제한을 초과 했습니다.'
+        async def handle(dialog):
+            await self.automation.handle_browser_dialog(self.page, 13, dialog)
+        self.page.on('dialog', handle)
+        await self.page.evaluate("""message => {
+            document.getElementById('ly_popInreservationMain_btnSave').onclick = () => alert(message);
+        }""", message)
+        with self.assertLogs('popup-test', level='ERROR') as logs:
+            result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'FAILED')
+        self.assertIn(message, result['detail'])
+        self.assertIn('저장 요청 미전송', result['detail'])
+        self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
+        self.assertIn(message, '\n'.join(logs.output))
+        key = self.automation.state.key('', '20990101', 13)
+        self.assertEqual(self.automation.state.get(key)['detail'], result['detail'])
+
+    async def test_missing_limit_stops_without_guessing_or_saving(self):
+        await self.page.locator('#ly_popInreservationMain_itemcntLimit').evaluate('el => el.remove()')
+        await self.assert_stops_before_save('품목 수 허용 한도를 확인하지 못했습니다')
+        self.assertNotIn('/selectMMIF0015List.do', self.requests)
+
+    async def test_alert_after_save_request_keeps_unknown_with_original_reason(self):
+        message = '13:00 시간의 품목 수 제한을 초과 했습니다.'
+        async def handle(dialog):
+            await self.automation.handle_browser_dialog(self.page, 13, dialog)
+        self.page.on('dialog', handle)
+        await self.page.evaluate("""message => {
+            document.getElementById('ly_popInreservationMain_btnSave').onclick = async () => {
+                await fetch('/saveInReservationItemListNew.do', {method:'POST'});
+                alert(message);
+            };
+        }""", message)
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'UNKNOWN')
+        self.assertIn(message, result['detail'])
         self.assertIn('/saveInReservationItemListNew.do', self.requests)
-        self.assertEqual([e['name'] for e in await self.page.evaluate('window.events')], ['open','query','add','save'])
 
     async def test_disabled_existing_reservation_still_stops(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
         await self.page.locator('#list input[type="checkbox"]').evaluate('el=>el.disabled=true')
-        self.automation.config['grid_wait_timeout_seconds'] = 0.1
-        await self.assert_stops_before_save('체크박스가 활성화되지 않았습니다')
+        self.automation.config['grid_wait_timeout_seconds'] = 0.5
+        # 조회 지연은 별도 테스트에서 검사한다. 여기서는 조회 후에도 비활성인 슬롯만 검증한다.
+        with patch.object(self.automation, 'refresh_reservation_list', AsyncMock(return_value=self.list_data)) as refresh:
+            await self.assert_stops_before_save('체크박스가 활성화되지 않았습니다')
+        refresh.assert_awaited_once()
 
     async def test_wrong_warehouse_stops_before_save(self):
         await self.page.locator('#ly_popInreservationMain_srchFacgubn').evaluate("el=>el.value='2'")
@@ -438,9 +562,61 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
     async def test_grid_timeout_bounds_slow_reload(self):
         self.automation.config['grid_wait_timeout_seconds'] = 0.1
         await self.page.locator('#list input[type="checkbox"]').evaluate('el=>el.disabled=true')
+        self.query_delays = [0.5]
         start = asyncio.get_running_loop().time()
-        await self.assert_stops_before_save('체크박스가 활성화되지 않았습니다')
+        await self.assert_stops_before_save('예약 목록 조회 지연.*마감 여부 미확인')
         self.assertLess(asyncio.get_running_loop().time()-start, 1)
+
+    async def test_list_waits_for_late_slot_masking_before_using_checkbox(self):
+        await self.page.evaluate("""() => {
+            window.jQuery = {active: 1};
+            setTimeout(() => {
+                document.querySelector('#list input').disabled = true;
+                document.getElementById('openMain').remove();
+                window.jQuery.active = 0;
+            }, 250);
+        }""")
+        await self.automation.refresh_reservation_list(self.page, 13)
+        self.assertFalse(await self.page.locator('#list input').is_enabled())
+        self.assertEqual(await self.page.locator('#openMain').count(), 0)
+
+    async def test_slow_query_over_old_six_second_limit_is_not_reissued(self):
+        self.automation.site_timeout_ms = 10000
+        self.query_delays = [6.5]
+        data = await self.automation.refresh_reservation_list(self.page, 13)
+        self.assertEqual(data, self.list_data)
+        self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 1)
+
+    async def test_read_only_query_retries_temporary_overload_and_timeout(self):
+        for failure in ('overload', 'timeout'):
+            with self.subTest(failure=failure):
+                self.requests.clear()
+                if failure == 'overload':
+                    self.automation.site_timeout_ms = 1000
+                    self.query_statuses = [503, 200]
+                else:
+                    self.automation.site_timeout_ms = 150
+                    self.query_delays = [0.4, 0]
+                with self.assertLogs('popup-test', level='WARNING') as logs:
+                    await self.automation.refresh_reservation_list(self.page, 13)
+                self.assertIn('[RETRY]', '\n'.join(logs.output))
+                self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 2)
+
+    async def test_slow_save_over_old_twelve_second_limit_waits_without_resubmission(self):
+        self.automation.save_timeout_seconds = 20
+        self.save_delay = 12.5
+        with self.assertLogs('popup-test', level='WARNING') as logs:
+            result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        self.assertEqual(self.requests.count('/saveInReservationItemListNew.do'), 1)
+        self.assertIn('[WAITING]', '\n'.join(logs.output))
+
+    async def test_save_deadline_keeps_unknown_and_never_retries_write(self):
+        self.automation.save_timeout_seconds = 0.15
+        self.save_delay = 0.5
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'UNKNOWN')
+        self.assertEqual(self.requests.count('/saveInReservationItemListNew.do'), 1)
 
 
 if __name__ == '__main__':

@@ -26,7 +26,9 @@ DEFAULT_CONFIG = {
     "record_video": False,
     "viewport_width": 2200,
     "viewport_height": 1080,
-    "grid_wait_timeout_seconds": 5.0,
+    "grid_wait_timeout_seconds": 60.0,
+    "site_timeout_seconds": 60.0,
+    "save_timeout_seconds": 120.0,
     "target_hours": [13, 14, 15],
     "skip_weekends": True,
     "skip_holidays": True,
@@ -48,6 +50,7 @@ def validate_config(config: dict) -> dict:
             len(set(hours)) != len(hours)):
         raise ValueError("target_hours는 중복 없는 시간대 목록이어야 합니다: 8,9,10,11,13,14,15")
     for key in ("keep_alive_interval_seconds", "keep_alive_timeout_seconds", "grid_wait_timeout_seconds",
+                "site_timeout_seconds", "save_timeout_seconds",
                 "pre_target_retry_delay_seconds", "viewport_width", "viewport_height"):
         value = config[key]
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
@@ -79,4 +82,8 @@ def load_config(config_path="config.json") -> dict:
         if not isinstance(user_config, dict):
             raise ValueError("설정 파일의 최상위 값은 JSON 객체여야 합니다.")
         config.update(user_config)
-    return validate_config(config)
+    validate_config(config)
+    # 예전 기본 경로도 모든 실행 진입점에서 단일 로그 폴더로 통일한다.
+    if os.path.normpath(config["log_dir"]) == "logs":
+        config["log_dir"] = "log"
+    return config

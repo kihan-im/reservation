@@ -37,16 +37,28 @@ class ReservationState:
             row = db.execute("SELECT status, detail FROM slots WHERE slot=?", (key,)).fetchone()
         return {"status": row[0], "detail": row[1]} if row else None
 
-    def claim(self, key):
+    def claim(self, key, allow_completed=False):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            old = db.execute("SELECT status FROM slots WHERE slot=?", (key,)).fetchone()
+            old = db.execute("SELECT status, detail FROM slots WHERE slot=?", (key,)).fetchone()
             # SUBMITTING may belong to another process; never steal it.
             allowed = {"FAILED", "UNKNOWN"}
+            if allow_completed:
+                allowed.update(("CONFIRMED", "WAIT"))
             if old and old[0] not in allowed:
                 raise RuntimeError(f"중복 저장 차단: {old[0]}. 서버 예약 내역과 실행 기록을 확인하세요.")
             db.execute("INSERT OR REPLACE INTO slots VALUES (?, 'SUBMITTING', ?)",
                        (key, now_kst().isoformat()))
+            return {"status": old[0], "detail": old[1]} if old else None
+
+    def release(self, key, previous):
+        """저장을 시작하지 않은 실행의 점유를 해제하고 직전 기록을 유지한다."""
+        with self.connect() as db:
+            if previous is None:
+                db.execute("DELETE FROM slots WHERE slot=? AND status='SUBMITTING'", (key,))
+            else:
+                db.execute("UPDATE slots SET status=?, detail=? WHERE slot=? AND status='SUBMITTING'",
+                           (previous['status'], previous['detail'], key))
 
     def finish(self, key, status, detail=""):
         with self.connect() as db:
@@ -67,4 +79,4 @@ def outcome_exit_code(results, dry_run=False):
     statuses = [result["status"] for result in results]
     if statuses and all(s == ("DRY_RUN" if dry_run else "CONFIRMED") for s in statuses):
         return 0
-    return 2 if any(s in ("CONFIRMED", "WAIT", "UNKNOWN", "SUBMITTING", "EXISTING") for s in statuses) else 1
+    return 2 if any(s in ("CONFIRMED", "WAIT", "UNKNOWN", "SUBMITTING", "EXISTING", "NO_CHANGE") for s in statuses) else 1

@@ -54,8 +54,6 @@ def main():
     args = parser.parse_args()
     try:
         config = load_config(args.config)
-        if config["log_dir"] == "logs":  # 이전 기본 경로를 새 구조로 전환
-            config["log_dir"] = "log"
         if args.headless or args.headful:
             config["headless"] = args.headless
         if args.record_video is not None:
