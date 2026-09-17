@@ -12,6 +12,8 @@ import sys
 import json
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
+from src.config import DEFAULT_CONFIG, MIN_GRID_WAIT_TIMEOUT_SECONDS
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 EXAMPLE_CONFIG_PATH = os.path.join(BASE_DIR, "config.example.json")
 
@@ -86,29 +88,12 @@ def run_wizard():
     base_config["user_id"] = new_id
     base_config["user_pw"] = new_pw
     
-    # 기본 필수 키 채우기
-    if "url" not in base_config:
-        base_config["url"] = "https://ebiz.cosmax.com/login/loginForm.do"
-    if "reservation_url" not in base_config:
-        base_config["reservation_url"] = "https://ebiz.cosmax.com/inreservationReg/inreservationRegListNew.do?gblCompid=1200&TMENU=M00003&LMENU=M00084"
-    if "target_hours" not in base_config:
-        base_config["target_hours"] = [13, 14, 15]
-    if "target_time" not in base_config:
-        base_config["target_time"] = "10:00:00"
-    if "keep_alive_interval_seconds" not in base_config:
-        base_config["keep_alive_interval_seconds"] = 30
-    base_config.setdefault("grid_wait_timeout_seconds", 5)
-    base_config.setdefault("keep_alive_timeout_seconds", 3)
-    base_config.setdefault("dry_run", False)
-    base_config.setdefault("record_video", False)
-    if "headless" not in base_config:
-        base_config["headless"] = False
-    if "skip_weekends" not in base_config:
-        base_config["skip_weekends"] = True
-    if "skip_holidays" not in base_config:
-        base_config["skip_holidays"] = True
-    if "custom_holidays" not in base_config:
-        base_config["custom_holidays"] = []
+    # 실행 코드와 동일한 기본값을 사용한다. 기존 사용자 값은 유지한다.
+    for key, value in DEFAULT_CONFIG.items():
+        base_config.setdefault(key, value)
+    if (type(base_config["grid_wait_timeout_seconds"]) not in (int, float)
+            or base_config["grid_wait_timeout_seconds"] < MIN_GRID_WAIT_TIMEOUT_SECONDS):
+        base_config["grid_wait_timeout_seconds"] = MIN_GRID_WAIT_TIMEOUT_SECONDS
 
     # 4. config.json 저장
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:

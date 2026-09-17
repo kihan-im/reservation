@@ -53,6 +53,18 @@ run_automation.bat --headful
 run_automation.bat --register-scheduler
 ```
 
+임시로 예약 화면을 보며 디버깅하려면 다음 명령으로 스케줄러를 다시 등록합니다. 실제 저장 없이 흐름만 보려면 수동으로 `run_automation.bat --headful --force --dry-run`을 실행하세요.
+
+```bat
+run_automation.bat --register-scheduler --headful
+```
+
+디버깅이 끝나면 아래 명령으로 기본 headless 스케줄로 되돌립니다.
+
+```bat
+run_automation.bat --register-scheduler
+```
+
 권한 오류가 발생하면 같은 실행 계정으로 관리자 권한 콘솔에서 재시도하세요. PowerShell이 설정과 등록된 작업 명령을 검사한 후 성공을 표시합니다. 기존 작업을 먼저 삭제하지 않고 갱신합니다.
 
 - 작업 이름: `CosmaxAutoReservation`

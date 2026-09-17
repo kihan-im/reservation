@@ -80,11 +80,6 @@ def main():
         sys.platform == 'win32' and config['headless'])
     if split_consoles:
         start_tab_consoles(logger)
-    config_dir = os.path.dirname(os.path.abspath(args.config))
-    config["state_dir"] = os.path.join(config_dir, ".reservation_state")
-    config["legacy_state_paths"] = [os.path.join(config["log_dir"], "reservation_state.sqlite3")]
-    if config["log_dir"] == os.path.join(config_dir, "log"):
-        config["legacy_state_paths"].append(os.path.join(config_dir, "logs", "reservation_state.sqlite3"))
     status, exit_code, results = "FAILED", 1, []
     logger.info(f"[START] {start.isoformat()} / 목표 {config['target_time']} KST / dry_run={config['dry_run']}")
     try:

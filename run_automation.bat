@@ -69,11 +69,13 @@ goto :END
 
 :REGISTER
 set "SCHEDULER_ACTION=Register"
+set "SCHEDULER_HEADFUL="
+for %%A in (%*) do if /i "%%~A"=="--headful" set "SCHEDULER_HEADFUL=-Headful"
 goto :SCHEDULER
 :UNREGISTER
 set "SCHEDULER_ACTION=Unregister"
 :SCHEDULER
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0register_scheduler.ps1" -Action %SCHEDULER_ACTION%
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0register_scheduler.ps1" -Action %SCHEDULER_ACTION% %SCHEDULER_HEADFUL%
 set "EXIT_CODE=%errorlevel%"
 goto :END
 

@@ -13,6 +13,7 @@ import re
 from datetime import date
 
 logger = logging.getLogger("CosmaxAutoLogin")
+MIN_GRID_WAIT_TIMEOUT_SECONDS = 60.0
 
 DEFAULT_CONFIG = {
     "url": "https://ebiz.cosmax.com/login/loginForm.do",
@@ -26,16 +27,18 @@ DEFAULT_CONFIG = {
     "record_video": False,
     "viewport_width": 2200,
     "viewport_height": 1080,
-    "grid_wait_timeout_seconds": 60.0,
+    "grid_wait_timeout_seconds": MIN_GRID_WAIT_TIMEOUT_SECONDS,
     "site_timeout_seconds": 60.0,
-    "save_timeout_seconds": 120.0,
-    "save_probe_after_seconds": 10.0,
-    "recovery_timeout_seconds": 600.0,
-    "retry_base_seconds": 2.0,
-    "retry_max_seconds": 15.0,
+    "save_timeout_seconds": 60.0,
+    "save_probe_after_seconds": 3.0,
+    "recovery_timeout_seconds": 30.0,
+    "retry_base_seconds": 1.0,
+    "retry_max_seconds": 2.0,
     "max_save_attempts": 3,
     "save_retry_absence_checks": 2,
-    "save_retry_grace_seconds": 5.0,
+    "save_retry_grace_seconds": 2.0,
+    "reservation_retry_window_seconds": 900.0,
+    "reservation_date": "",
     "material_count_by_hour": {},
     "capture_pre_save_screenshots": False,
     "target_hours": [13, 14, 15],
@@ -61,7 +64,7 @@ def validate_config(config: dict) -> dict:
     for key in ("keep_alive_interval_seconds", "keep_alive_timeout_seconds", "grid_wait_timeout_seconds",
                 "site_timeout_seconds", "save_timeout_seconds", "save_probe_after_seconds",
                 "recovery_timeout_seconds", "retry_base_seconds", "retry_max_seconds",
-                "save_retry_grace_seconds",
+                "save_retry_grace_seconds", "reservation_retry_window_seconds",
                 "pre_target_retry_delay_seconds", "viewport_width", "viewport_height"):
         value = config[key]
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
@@ -87,6 +90,11 @@ def validate_config(config: dict) -> dict:
     for key in ("url", "reservation_url", "log_dir"):
         if not isinstance(config[key], str) or not config[key].strip():
             raise ValueError(f"{key}는 비어 있을 수 없습니다.")
+    reservation_date = config.get("reservation_date", "")
+    if reservation_date and not re.fullmatch(r"\d{8}", reservation_date):
+        raise ValueError("reservation_date는 비워 두거나 YYYYMMDD 형식이어야 합니다.")
+    if reservation_date:
+        date.fromisoformat(f"{reservation_date[:4]}-{reservation_date[4:6]}-{reservation_date[6:]}")
     if not isinstance(config["custom_holidays"], list):
         raise ValueError("custom_holidays는 YYYY-MM-DD 목록이어야 합니다.")
     for day in config["custom_holidays"]:
@@ -106,6 +114,9 @@ def load_config(config_path="config.json") -> dict:
             raise ValueError("설정 파일의 최상위 값은 JSON 객체여야 합니다.")
         config.update(user_config)
     validate_config(config)
+    if config["grid_wait_timeout_seconds"] < MIN_GRID_WAIT_TIMEOUT_SECONDS:
+        logger.warning("grid_wait_timeout_seconds가 60초 미만이어서 60초로 보정합니다.")
+        config["grid_wait_timeout_seconds"] = MIN_GRID_WAIT_TIMEOUT_SECONDS
     # 예전 기본 경로도 모든 실행 진입점에서 단일 로그 폴더로 통일한다.
     if os.path.normpath(config["log_dir"]) == "logs":
         config["log_dir"] = "log"

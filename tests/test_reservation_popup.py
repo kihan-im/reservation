@@ -373,23 +373,29 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
 
-    async def test_unknown_result_retries_next_run_without_extra_flag(self):
+    async def test_unknown_existing_mismatch_is_not_blindly_resubmitted(self):
         self.list_data['rows'][0]['colink5'] = 'another-vendor'
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
         before = self.requests.count('/saveInReservationItemListNew.do')
+        self.automation.config.update(recovery_timeout_seconds=.01,
+                                      retry_base_seconds=.001, retry_max_seconds=.001)
         self.list_data['rows'][0]['colink5'] = '102190'
         await self.page.reload()
         again = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(again['status'], 'CONFIRMED')
-        self.assertTrue(await self.page.locator('[aria-describedby="list_checkYn5"] input').is_checked())
-        self.assertEqual(before + 1, self.requests.count('/saveInReservationItemListNew.do'))
-        await self.page.reload()
-        await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
-        self.existing_data = {'rows': [{}] * 8}
-        final = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(final['status'], 'NO_CHANGE')
-        self.assertEqual(before + 1, self.requests.count('/saveInReservationItemListNew.do'))
+        self.assertEqual(again['status'], 'UNKNOWN')
+        self.assertEqual(before, self.requests.count('/saveInReservationItemListNew.do'))
+
+    async def test_non_http_unknown_retries_without_recovery_delay(self):
+        key = self.automation.state.key('', '20990101', 13)
+        self.automation.state.finish(key, 'UNKNOWN', '저장 후 목록 확인 실패')
+        self.automation.state.save_intent(key, {'retryable_save':False, 'save_attempt':1})
+        with patch.object(self.automation, 'recover_unknown', AsyncMock()) as recover, \
+             patch.object(self.automation, 'reserve_with_recovery', AsyncMock(return_value={'hour':13, 'day':'20990101', 'status':'CONFIRMED'})) as reserve:
+            result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        recover.assert_not_awaited()
+        reserve.assert_awaited_once()
 
     async def test_submitting_record_still_blocks_parallel_save(self):
         key = self.automation.state.key('', '20990101', 13)
@@ -401,8 +407,40 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_save_http_error_cannot_be_confirmed(self):
         self.save_status = 503
+        self.automation.config.update(recovery_timeout_seconds=.01, retry_base_seconds=.001,
+                                      retry_max_seconds=.001)
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
+        key = self.automation.state.key('', '20990101', 13)
+        self.assertTrue(self.automation.state.get_intent(key)['retryable_save'])
+
+    async def test_slow_save_keeps_original_request_after_two_absent_server_checks(self):
+        absent = {'hour':13, 'day':'20990101', 'status':'ABSENT'}
+        confirmed = {'hour':13, 'day':'20990101', 'status':'CONFIRMED'}
+        self.automation.config.update(save_probe_after_seconds=.001, retry_base_seconds=.001,
+                                      retry_max_seconds=.001, save_retry_absence_checks=2)
+        with patch.object(self.automation, 'inspect_saved_reservation', AsyncMock(side_effect=[absent, absent, confirmed])) as inspect, \
+             patch('src.recovery.asyncio.sleep', AsyncMock()):
+            result = await self.automation.observe_slow_save(self.page, 13, '20990101', {'owner':'102190'})
+        self.assertEqual(result, confirmed)
+        self.assertEqual(inspect.await_count, 3)
+
+    async def test_retry_ready_restarts_reservation_without_waiting_for_other_slots(self):
+        retry = {'hour':13, 'day':'20990101', 'status':'RETRY_READY', 'detail':'저장 결과 없음 재조회 2회 확인'}
+        confirmed = {'hour':13, 'day':'20990101', 'status':'CONFIRMED', 'detail':'예약번호 12345'}
+        with patch.object(self.automation, 'reserve_open_slot', AsyncMock(side_effect=[retry, confirmed])) as reserve, \
+             patch.object(self.automation, 'prepare_reservation_tab', AsyncMock()) as prepare, \
+             patch.object(self.automation, 'dismiss_retry_notice', AsyncMock()) as dismiss:
+            result = await self.automation.reserve_with_recovery(self.page, 13, '20990101', 'slot')
+        self.assertEqual(result, confirmed)
+        self.assertEqual(reserve.await_count, 2)
+        prepare.assert_awaited_once()
+        dismiss.assert_awaited_once()
+
+    async def test_retry_closes_visible_site_notice(self):
+        await self.page.evaluate("notice('예상치 못한 502 오류')")
+        await self.automation.dismiss_retry_notice(self.page, 13)
+        self.assertFalse(await self.page.locator('#lyNoti').is_visible())
 
     async def test_business_save_failure(self):
         self.save_data = {'returnCode':'FAIL', 'returnMessage':'마감'}
@@ -424,7 +462,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         before = self.requests.count('/saveInReservationItemListNew.do')
         self.existing_data = {'rows': [{}] * 8}
         again = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(again['status'], 'NO_CHANGE')
+        self.assertEqual(again['status'], 'EXISTING_CONFIRMED')
         self.assertEqual(before, self.requests.count('/saveInReservationItemListNew.do'))
 
     async def test_completed_records_do_not_block_enabled_slot_with_capacity(self):
@@ -461,7 +499,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         # 조회 기간에 포함된 기존 품목은 하나뿐이어도 메인에는 기존 8개가 남아 있다.
         self.data['rows'] = [{'allowed':'O', 'checked':True}] + [{'allowed':'O'}] * 3
         result = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(result['status'], 'NO_CHANGE')
+        self.assertEqual(result['status'], 'EXISTING_CONFIRMED')
         self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr[id^="existing"]').count(), 8)
         self.assertNotIn('/selectMMIF0015List.do', self.requests)
@@ -470,7 +508,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
         self.existing_data = {'rows': [{}] * 9, 'itemCount': 8}
         result = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(result['status'], 'NO_CHANGE')
+        self.assertEqual(result['status'], 'EXISTING_CONFIRMED')
         self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
 
     async def test_remaining_capacity_controls_selection_for_empty_six_and_seven_items(self):
@@ -617,6 +655,8 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
         self.assertEqual(self.requests.count('/saveInReservationItemListNew.do'), 1)
+        key = self.automation.state.key('', '20990101', 13)
+        self.assertTrue(self.automation.state.get_intent(key)['retryable_save'])
 
 
 if __name__ == '__main__':

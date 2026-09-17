@@ -19,6 +19,16 @@ class WindowsEncodingTest(unittest.TestCase):
                 data = (root / name).read_bytes()
                 self.assertEqual(data.decode('cp949'), data.decode('ascii'))
 
+    def test_scheduler_registration_can_temporarily_use_headful(self):
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / 'run_automation.bat').read_text(encoding='ascii')
+        scheduler = (root / 'register_scheduler.ps1').read_text(encoding='utf-8')
+        self.assertIn('SCHEDULER_HEADFUL=-Headful', launcher)
+        self.assertIn('-Action %SCHEDULER_ACTION% %SCHEDULER_HEADFUL%', launcher)
+        self.assertIn('[switch]$Headful', scheduler)
+        self.assertIn("if ($Headful) { '--headful' } else { '--headless' }", scheduler)
+        self.assertIn('-StartWhenAvailable', scheduler)
+
 
 @unittest.skipUnless(os.name == 'nt', 'Windows cmd.exe required')
 class WindowsLauncherTest(unittest.TestCase):

@@ -26,12 +26,20 @@ class RuntimeTest(unittest.TestCase):
             path.write_text(json.dumps({'log_dir': 'custom-output'}))
             self.assertEqual(load_config(path)['log_dir'], 'custom-output')
 
+    def test_legacy_five_second_grid_wait_is_effectively_migrated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'config.json'
+            path.write_text(json.dumps({'grid_wait_timeout_seconds': 5}))
+            self.assertEqual(load_config(path)['grid_wait_timeout_seconds'], 60.0)
+            self.assertEqual(json.loads(path.read_text())['grid_wait_timeout_seconds'], 5)
+
     def test_invalid_config_fails_closed(self):
         for key, value in [('target_time','25:00:00'), ('target_hours',[]), ('target_hours',[13,13]),
                            ('target_hours',[12]), ('grid_wait_timeout_seconds',-1),
                            ('keep_alive_timeout_seconds',float('nan')), ('headless','false'), ('record_video','true'),
                            ('site_timeout_seconds',0), ('save_timeout_seconds',float('inf')),
-                           ('max_pre_target_retries',1.5), ('custom_holidays',['2026-02-30'])]:
+                           ('max_pre_target_retries',1.5), ('custom_holidays',['2026-02-30']),
+                           ('reservation_date','20260230')]:
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 validate_config(dict(DEFAULT_CONFIG, **{key:value}))
         with tempfile.TemporaryDirectory() as folder:
@@ -42,39 +50,40 @@ class RuntimeTest(unittest.TestCase):
 
     def test_unknown_can_retry_but_active_or_confirmed_claims_cannot_repeat(self):
         with tempfile.TemporaryDirectory() as folder:
-            first, second = ReservationState(folder), ReservationState(folder)
-            key = first.key('account','20990101',13)
-            first.claim(key)
+            state = ReservationState(folder)
+            key = state.key('account','20990101',13)
+            state.claim(key)
             with self.assertRaises(RuntimeError):
-                second.claim(key)
-            first.finish(key, 'UNKNOWN')
-            second.claim(key)
+                state.claim(key)
+            state.finish(key, 'UNKNOWN')
+            state.claim(key)
             with self.assertRaises(RuntimeError):
-                first.claim(key)
-            second.finish(key, 'CONFIRMED', '예약번호 123')
+                state.claim(key)
+            state.finish(key, 'CONFIRMED', '예약번호 123')
             with self.assertRaises(RuntimeError):
-                first.claim(key)
+                state.claim(key)
 
     def test_outcome_codes_preserve_partial_wait_and_unknown(self):
         for statuses, expected in [(['CONFIRMED']*3,0), (['CONFIRMED','FAILED'],2),
-                                   (['WAIT'],2), (['UNKNOWN'],2), (['EXISTING'],2), (['NO_CHANGE'],2), (['FAILED'],1), ([],1)]:
+                                   (['EXISTING_CONFIRMED'],0), (['WAIT'],2), (['UNKNOWN'],2),
+                                   (['EXISTING'],2), (['NO_CHANGE'],2), (['FAILED'],1), ([],1)]:
             self.assertEqual(outcome_exit_code([dict(status=s) for s in statuses]), expected)
         self.assertEqual(outcome_exit_code([dict(status='DRY_RUN')], True),0)
 
     def test_completed_recheck_locks_only_its_slot_and_restores_previous_state(self):
         with tempfile.TemporaryDirectory() as folder:
-            first, second = ReservationState(folder), ReservationState(folder)
-            key14 = first.key('account', '20990101', 14)
-            key15 = first.key('account', '20990101', 15)
-            first.finish(key14, 'CONFIRMED', 'previous')
-            previous = first.claim(key14, allow_completed=True)
+            state = ReservationState(folder)
+            key14 = state.key('account', '20990101', 14)
+            key15 = state.key('account', '20990101', 15)
+            state.finish(key14, 'CONFIRMED', 'previous')
+            previous = state.claim(key14, allow_completed=True)
             with self.assertRaises(RuntimeError):
-                second.claim(key14, allow_completed=True)
-            other = second.claim(key15, allow_completed=True)
-            first.release(key14, previous)
-            second.release(key15, other)
-            self.assertEqual(first.get(key14), {'status':'CONFIRMED', 'detail':'previous'})
-            self.assertIsNone(first.get(key15))
+                state.claim(key14, allow_completed=True)
+            other = state.claim(key15, allow_completed=True)
+            state.release(key14, previous)
+            state.release(key15, other)
+            self.assertEqual(state.get(key14), {'status':'CONFIRMED', 'detail':'previous'})
+            self.assertIsNone(state.get(key15))
 
     def test_logs_survive_rerun_and_include_completion_in_html(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -108,24 +117,13 @@ class RuntimeTest(unittest.TestCase):
             self.assertTrue(first.exists())
             self.assertEqual({p.suffix for p in Path(folder).rglob('*') if p.is_file()}, {'.log', '.html'})
 
-    def test_old_reservation_records_survive_log_layout_change(self):
+    def test_reservation_state_is_memory_only(self):
         with tempfile.TemporaryDirectory() as folder:
-            old = ReservationState(Path(folder) / 'logs')
-            confirmed = old.key('account', '20990101', 13)
-            pending = old.key('account', '20990101', 14)
-            old.finish(confirmed, 'CONFIRMED', 'existing reservation')
-            old.claim(pending)
-            new_dir = Path(folder) / '.reservation_state'
-            current = ReservationState(new_dir, legacy_paths=[old.path])
-            self.assertEqual(current.get(confirmed), old.get(confirmed))
-            with self.assertRaises(RuntimeError):
-                current.claim(confirmed)
-            with self.assertRaises(RuntimeError):
-                current.claim(pending)
-            current.finish(pending, 'CONFIRMED', 'verified later')
-            again = ReservationState(new_dir, legacy_paths=[old.path])
-            self.assertEqual(again.get(pending)['detail'], 'verified later')
-            self.assertTrue(old.path.exists())
+            first = ReservationState(folder)
+            key = first.key('account', '20990101', 13)
+            first.finish(key, 'CONFIRMED', 'existing reservation')
+            self.assertIsNone(ReservationState(folder).get(key))
+            self.assertFalse(list(Path(folder).rglob('*.sqlite3')))
 
     def test_missing_holiday_dependency_is_not_silently_ignored(self):
         with patch('src.holiday.HAS_HOLIDAYS_PKG',False), self.assertRaisesRegex(RuntimeError,'holidays'):

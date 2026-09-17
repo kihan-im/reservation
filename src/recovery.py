@@ -31,6 +31,9 @@ def materials_match(expected, actual):
         return False
     if any(not isinstance(row, dict) or not fields.issubset(row) for row in actual):
         return False
+    stable = {field for field in fields if any(
+        token in field.lower() for token in ("code", "item", "matnr", "seq", "_id", "cd"))}
+    fields = stable or fields
     clean = lambda value: " ".join(unescape(re.sub(r"<[^>]*>", "", str(value or ""))).split())
     normalize = lambda rows: Counter(
         tuple((key, clean(row[key])) for key in sorted(fields)) for row in rows)
@@ -55,7 +58,7 @@ class ReservationRecoveryMixin:
             return out;
         })""")
 
-    async def inspect_saved_reservation(self, source_page, hour, day, intent):
+    async def inspect_saved_reservation(self, source_page, hour, day, intent, verification_page=None):
         if not intent or not intent.get("owner") or not intent.get("materials") or not all(intent["materials"]):
             raise RuntimeError("저장 결과 비교 자료가 없습니다.")
         items_url = intent.get("items_url", "")
@@ -63,9 +66,11 @@ class ReservationRecoveryMixin:
         if ((source.scheme, source.netloc) != (target.scheme, target.netloc)
                 or not target.path.endswith("/selectInReservationItemListNew.do")):
             raise RuntimeError("저장 품목 조회 주소가 올바르지 않습니다.")
-        page = await source_page.context.new_page()
+        page = verification_page or await source_page.context.new_page()
         try:
-            await self.prepare_reservation_tab(page, hour)
+            reservation_path = urlsplit(self.config.get("reservation_url", "")).path
+            if urlsplit(page.url).path != reservation_path:
+                await self.prepare_reservation_tab(page, hour)
             date_field = page.locator("#srchReservDay")
             if await date_field.input_value() != day:
                 await date_field.fill(day)
@@ -96,19 +101,52 @@ class ReservationRecoveryMixin:
                     return dict(hour=hour, day=day, status=status, detail=f"예약번호 {seq} / 재조회 확인")
             return None if found else dict(hour=hour, day=day, status="ABSENT")
         finally:
-            self.dialog_pages.discard(page)
-            await page.close()
+            if verification_page is None:
+                self.dialog_pages.discard(page)
+                await page.close()
 
     async def observe_slow_save(self, page, hour, day, intent):
         await asyncio.sleep(self.config.get("save_probe_after_seconds", 10))
-        while True:
-            try:
-                result = await self.inspect_saved_reservation(page, hour, day, intent)
-                if result and result["status"] in ("CONFIRMED", "WAIT"):
-                    return result
-            except Exception as error:
-                self.logger.warning(f"[{hour}시 탭] 저장 대기 중 결과 조회 실패: {error}")
-            await asyncio.sleep(self.config.get("retry_max_seconds", 15))
+        absent = attempt = 0
+        try:
+            verification_page = await page.context.new_page()
+        except Exception:
+            verification_page = None
+        try:
+            while True:
+                try:
+                    result = await self.inspect_saved_reservation(
+                        page, hour, day, intent, verification_page)
+                    if result and result["status"] in ("CONFIRMED", "WAIT"):
+                        return result
+                    absent = absent + 1 if result and result["status"] == "ABSENT" else 0
+                    if absent == self.config.get("save_retry_absence_checks", 2):
+                        self.logger.info(
+                            f"[{hour}시 탭] [WAITING] 서버 예약 미확인 {absent}회: "
+                            "기존 저장 요청 응답을 계속 대기")
+                except Exception as error:
+                    absent = 0
+                    self.logger.warning(f"[{hour}시 탭] 저장 대기 중 결과 조회 실패: {error}")
+                attempt += 1
+                await asyncio.sleep(min(15, 3 + attempt * 4))
+        finally:
+            if verification_page:
+                self.dialog_pages.discard(verification_page)
+                await verification_page.close()
+
+    async def dismiss_retry_notice(self, page, hour):
+        """502 등 재시도 전 사이트 HTML 알림을 닫는다. 브라우저 dialog는 이미 리스너가 승인한다."""
+        notice = page.locator("#lyNoti")
+        try:
+            if not await notice.is_visible():
+                return
+            message = " ".join(await notice.locator("p").all_text_contents()).strip()
+            close = notice.locator(".pop_btnclose")
+            if await close.count() and await close.is_visible():
+                await close.click(timeout=min(self.site_timeout_ms, 2000))
+                self.logger.warning(f"[{hour}시 탭] 재시도 전 사이트 알림 닫음: {message or '내용 없음'}")
+        except Exception as error:
+            self.logger.warning(f"[{hour}시 탭] 재시도 전 사이트 알림 닫기 실패: {error}")
 
     async def recover_unknown(self, page, hour, day, key, result):
         intent = self.state.get_intent(key)
@@ -118,26 +156,36 @@ class ReservationRecoveryMixin:
         deadline = asyncio.get_running_loop().time() + self.config.get("recovery_timeout_seconds", 600)
         not_before = asyncio.get_running_loop().time() + self.config.get("save_retry_grace_seconds", 5)
         absent = attempt = 0
-        while asyncio.get_running_loop().time() < deadline:
-            delay = retry_delay(attempt, self.config.get("retry_base_seconds", 2),
-                                self.config.get("retry_max_seconds", 15))
-            if asyncio.get_running_loop().time() + delay >= deadline:
-                break
-            await asyncio.sleep(delay)
-            try:
-                checked = await self.inspect_saved_reservation(page, hour, day, intent)
-                if checked and checked["status"] in ("CONFIRMED", "WAIT"):
-                    return checked
-                absent = absent + 1 if checked and checked["status"] == "ABSENT" else 0
-                if (intent and intent.get("retryable_http")
-                        and intent.get("save_attempt", 1) < self.config.get("max_save_attempts", 3)
-                        and absent >= self.config.get("save_retry_absence_checks", 2)
-                        and asyncio.get_running_loop().time() >= not_before):
-                    return dict(hour=hour, day=day, status="RETRY_READY")
-            except Exception as error:
-                absent = 0
-                self.logger.warning(f"[{hour}시 탭] 결과 재조회 실패: {error}")
-            attempt += 1
+        try:
+            verification_page = await page.context.new_page()
+        except Exception:
+            verification_page = None
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                delay = retry_delay(attempt, self.config.get("retry_base_seconds", 2),
+                                    self.config.get("retry_max_seconds", 15))
+                if asyncio.get_running_loop().time() + delay >= deadline:
+                    break
+                await asyncio.sleep(delay)
+                try:
+                    checked = await self.inspect_saved_reservation(
+                        page, hour, day, intent, verification_page)
+                    if checked and checked["status"] in ("CONFIRMED", "WAIT"):
+                        return checked
+                    absent = absent + 1 if checked and checked["status"] == "ABSENT" else 0
+                    if ((intent.get("retryable_save") or intent.get("retryable_http"))
+                            and absent >= self.config.get("save_retry_absence_checks", 2)
+                            and asyncio.get_running_loop().time() >= not_before):
+                        return dict(hour=hour, day=day, status="RETRY_READY",
+                                    detail=f"저장 결과 없음 재조회 {absent}회 확인")
+                except Exception as error:
+                    absent = 0
+                    self.logger.warning(f"[{hour}시 탭] 결과 재조회 실패: {error}")
+                attempt += 1
+        finally:
+            if verification_page:
+                self.dialog_pages.discard(verification_page)
+                await verification_page.close()
         result["detail"] += " / 복구 시간 종료: 서버 내역 확인 필요"
         return result
 
@@ -145,10 +193,13 @@ class ReservationRecoveryMixin:
         for attempt in range(self.config.get("max_save_attempts", 3)):
             self.slot_attempts[hour] = attempt + 1
             if attempt:
+                await self.dismiss_retry_notice(page, hour)
                 await self.prepare_reservation_tab(page, hour)
             result = await self.reserve_open_slot(page, hour, day, key)
             if result["status"] == "UNKNOWN":
                 result = await self.recover_unknown(page, hour, day, key, result)
-            if result["status"] != "RETRY_READY":
-                return result
+            if result["status"] == "RETRY_READY":
+                self.logger.warning(f"[{hour}시 탭] [RETRY] {attempt + 2}차 저장 시도: {result['detail']}")
+                continue
+            return result
         return dict(hour=hour, day=day, status="UNKNOWN", detail="저장 재시도 한도 도달")
