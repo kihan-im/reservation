@@ -14,9 +14,10 @@ from urllib.parse import urlsplit, parse_qs
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from src.reservation_state import ReservationState, now_kst
 from src.window_capture import capture_browser_window
+from src.recovery import ReservationRecoveryMixin, ResponseError, RecoveredReservation, retry_delay
 
 
-class CosmaxAutomation:
+class CosmaxAutomation(ReservationRecoveryMixin):
     def __init__(self, config: dict, logger: logging.Logger):
         self.config = config
         self.logger = logger
@@ -28,6 +29,9 @@ class CosmaxAutomation:
         self.dialog_capture_lock = asyncio.Lock()
         self.dialog_count = {}
         self.browser_alerts = {}
+        self.dialog_pages = set()
+        self.slot_attempts = {}
+        self.slot_write_attempts = {}
         self.site_timeout_ms = config.get('site_timeout_seconds', 60) * 1000
         self.save_timeout_seconds = config.get('save_timeout_seconds', 120)
         self.server_offset_seconds = 0.0  # 서버 시간 - 로컬 시간 (초 단위 오차)
@@ -59,7 +63,7 @@ class CosmaxAutomation:
         if page and not page.is_closed():
             try:
                 screenshot_path = os.path.join(
-                    self.get_tab_output_dir(hour), f"{self.image_prefix}_{hour:02d}_failure.png")
+                    self.get_tab_output_dir(hour), f"{self.artifact_prefix(hour)}_{hour:02d}_failure.png")
                 await page.screenshot(path=screenshot_path, full_page=False)
                 self.has_captured_screenshot = True
                 self.logger.error(f"★ {tab_label}[FAIL] 실패 지점 스크린샷 저장 완료: {screenshot_path}")
@@ -92,13 +96,15 @@ class CosmaxAutomation:
 
     async def save_stage_screenshot(self, page, hour: int, stage: int, name: str) -> str:
         """현재 뷰포트를 캡처한다. 전체 페이지 캡처는 사이트의 resize 핸들러로 팝업 순서를 바꾼다."""
+        if stage < 8 and self.config.get("capture_pre_save_screenshots", True) is False:
+            return ""
         if not page or page.is_closed():
             self.logger.warning(f"[{hour}시 탭] 단계 {stage:02d} 스크린샷을 저장할 페이지가 없습니다.")
             return ""
 
         path = os.path.join(
             self.get_tab_output_dir(hour),
-            f"{self.image_prefix}_{hour:02d}_{stage:02d}_{name}.png",
+            f"{self.artifact_prefix(hour)}_{hour:02d}_{stage:02d}_{name}.png",
         )
         try:
             await page.screenshot(path=path, full_page=False)
@@ -248,7 +254,9 @@ class CosmaxAutomation:
         async def handle_dialog(dialog):
             await self.handle_browser_dialog(page, hour, dialog)
 
-        page.on("dialog", handle_dialog)
+        if page not in self.dialog_pages:
+            page.on("dialog", handle_dialog)
+            self.dialog_pages.add(page)
 
         reservation_url = self.config.get("reservation_url")
         if reservation_url:
@@ -346,13 +354,14 @@ class CosmaxAutomation:
                 if attempt == 2:
                     raise
                 reason = '조회 시간 초과'
-            delay = 2 ** (attempt + 1)
+            delay = retry_delay(attempt, self.config.get("retry_base_seconds", 2),
+                                self.config.get("retry_max_seconds", 15))
             self.logger.warning(f"[{hour}시 탭] [RETRY] {step}: {reason}, {delay}초 후 조회 재시도 ({attempt + 2}/3)")
             await asyncio.sleep(delay)
 
     async def read_json_response(self, response, step, timeout=None):
         if not response.ok:
-            raise RuntimeError(f"{step} HTTP 오류: {response.status}")
+            raise ResponseError(step, response)
         try:
             data = await asyncio.wait_for(response.json(), timeout=timeout or self.site_timeout_ms / 1000)
         except Exception as error:
@@ -420,7 +429,7 @@ class CosmaxAutomation:
             )
             self.logger.info(f"[{hour}시 탭] 자급자재 조회 응답: HTTP {response.status}")
             if not response.ok:
-                raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 HTTP 오류: {response.status}")
+                raise ResponseError(f"[{hour}시 탭] 자급자재 조회", response)
             try:
                 data = await asyncio.wait_for(response.json(), timeout=self.site_timeout_ms / 1000)
             except asyncio.TimeoutError as error:
@@ -456,14 +465,23 @@ class CosmaxAutomation:
                 'input[type="checkbox"]:enabled:not(:checked)'
             )
             count = await eligible.count()
-            add_count = min(3, remaining, count)
-            if add_count == 0:
-                raise RuntimeError(f"[{hour}시 탭] 추가 가능한 미선택 납품허용 자급자재가 없습니다. (기존 {main_count_before}개 / 허용 {limit}개)")
             # 일반품목(C2)은 사이트의 소품목 상한보다 많아야 한다.
             minimum_field = page.locator('#ly_popInreservationMain_itemcntLimitC3')
             minimum_text = (await minimum_field.input_value(timeout=self.site_timeout_ms)).strip()
             if not minimum_text.isascii() or not minimum_text.isdigit():
                 raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량을 확인하지 못했습니다. 저장 생략")
+            minimum = int(minimum_text) + 1
+            target = self.config.get("material_count_by_hour", {}).get(str(hour))
+            if target is not None and not minimum <= target <= limit:
+                raise RuntimeError(f"[{hour}시 탭] 설정 종목 수 {target}개가 사이트 허용 범위 {minimum}~{limit}개 밖입니다.")
+            desired = max(3, minimum - main_count_before) if target is None else max(0, target - main_count_before)
+            add_count = min(desired, remaining, count)
+            if target is not None and main_count_before >= target:
+                return 0
+            if add_count == 0:
+                raise RuntimeError(f"[{hour}시 탭] 추가 가능한 미선택 납품허용 자급자재가 없습니다. (기존 {main_count_before}개 / 허용 {limit}개)")
+            if target is not None and main_count_before + add_count < target:
+                raise RuntimeError(f"[{hour}시 탭] 목표 {target}개에 필요한 선택 가능 자재가 부족합니다.")
             expected_main_count = main_rows_before + add_count
             if main_count_before + add_count <= int(minimum_text):
                 raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량 미달: 추가 후 {main_count_before + add_count}개 / 최소 {int(minimum_text) + 1}개. 저장 생략")
@@ -495,6 +513,8 @@ class CosmaxAutomation:
             if main_rows_after != expected_main_count:
                 raise RuntimeError(f"[{hour}시 탭] 자급자재 추가 확인 실패: 기존 {main_rows_before}행 + 신규 {add_count}행, 실제 {main_rows_after}행")
             main_count_after = await self.read_material_count(page, hour)
+            if target is not None and main_count_after != target:
+                raise RuntimeError(f"[{hour}시 탭] 실제 종목 수 {main_count_after}개가 목표 {target}개와 다릅니다.")
             if main_count_after <= int(minimum_text):
                 raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량 미달: 현재 {main_count_after}개 / 최소 {int(minimum_text) + 1}개. 저장 생략")
             self.logger.info(f"[{hour}시 탭] 메인 예약창 자급자재 추가 완료: 기존 종목 {main_count_before}개 / 체크박스 {add_count}개 추가 / 현재 종목 {main_count_after}개")
@@ -591,11 +611,26 @@ class CosmaxAutomation:
             self.submitted_hours.discard(hour)
             if previous:
                 self.logger.info(f"[{tab_label}] 이전 기록 {previous['status']} / {day}: 현재 체크박스와 품목 수를 다시 확인합니다")
+        result = None
         try:
-            return await self.reserve_open_slot(page, hour, day, key)
+            if previous and previous['status'] == 'UNKNOWN':
+                self.submitted_hours.add(hour)
+                self.slot_write_attempts[hour] = (self.state.get_intent(key) or {}).get('save_attempt', 1)
+                result = dict(hour=hour, day=day, status='UNKNOWN', detail=previous['detail'])
+                result = await self.recover_unknown(page, hour, day, key, result)
+                if result['status'] == 'RETRY_READY':
+                    result = await self.reserve_with_recovery(page, hour, day, key)
+            else:
+                result = await self.reserve_with_recovery(page, hour, day, key)
+            return result
         finally:
-            if not dry_run and hour not in self.submitted_hours:
-                self.state.release(key, previous)
+            if not dry_run:
+                if result and result['status'] not in ('NO_CHANGE', 'DRY_RUN'):
+                    self.state.finish(key, result['status'], result.get('detail', ''))
+                elif hour in self.submitted_hours:
+                    self.state.finish(key, 'UNKNOWN', '저장 또는 결과 확인 중 실행 중단')
+                else:
+                    self.state.release(key, previous)
 
     async def reserve_open_slot(self, page, hour, day, key):
         tab_label = f"{hour}시 탭"
@@ -643,7 +678,7 @@ class CosmaxAutomation:
         # 3~6. 실제 팝업 표시와 조회 완료를 확인하며 자급자재를 추가한다.
         added_count = await self.add_self_materials(page, hour)
         if added_count == 0:
-            return dict(hour=hour, day=day, status='NO_CHANGE', detail='품목 수가 허용 한도에 도달하여 추가·저장 생략')
+            return dict(hour=hour, day=day, status='NO_CHANGE', detail='품목 수가 목표 또는 허용 한도에 도달하여 추가·저장 생략')
 
         # 7. 실제 입력란에 수량을 입력하고 change 이벤트가 발생하도록 포커스를 이동한다.
         await self.check_site_notice(page, hour, "수량 입력")
@@ -664,6 +699,10 @@ class CosmaxAutomation:
             self.logger.info(f"[{tab_label}] [DRY_RUN] {day} / {hour}시 / 청북2층 / 일반품목 / 기존 선택 유지 및 자재 {added_count}개 추가 검증 완료. 저장 생략")
             return dict(hour=hour, day=day, status='DRY_RUN')
 
+        self.slot_write_attempts[hour] = self.slot_write_attempts.get(hour, 0) + 1
+        intent = dict(materials=await self.snapshot_materials(page), owner='', items_url='',
+                      save_attempt=self.slot_write_attempts[hour], retryable_http=False)
+        self.state.save_intent(key, intent)
         self.submitted_hours.add(hour)
         result = dict(hour=hour, day=day, status='UNKNOWN', detail='저장 결과 확인 필요')
         responses = []
@@ -674,6 +713,10 @@ class CosmaxAutomation:
             nonlocal save_requested
             if request.method == 'POST' and urlsplit(request.url).path.endswith('/saveInReservationItemListNew.do'):
                 save_requested = True
+                intent['owner'] = parse_qs(request.post_data or '').get('colink', [''])[0]
+                intent['items_url'] = request.url.split('?', 1)[0].replace(
+                    '/saveInReservationItemListNew.do', '/selectInReservationItemListNew.do')
+                self.state.save_intent(key, intent)
         def collect(response):
             if response.request.method == 'POST' and urlsplit(response.url).path.endswith('/saveInReservationWait.do'):
                 responses.append(response)
@@ -684,15 +727,20 @@ class CosmaxAutomation:
                 rejection_signal.set_result(message)
         async def response_or_rejection(awaitable):
             response_task = asyncio.ensure_future(awaitable)
+            probe_task = asyncio.create_task(self.observe_slow_save(page, hour, day, intent))
             try:
-                done, _ = await asyncio.wait({response_task, rejection_signal}, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    {response_task, rejection_signal, probe_task}, return_when=asyncio.FIRST_COMPLETED)
                 if response_task in done:
                     return await response_task
-                raise RuntimeError(rejection_signal.result())
+                if rejection_signal in done:
+                    raise RuntimeError(rejection_signal.result())
+                raise RecoveredReservation(await probe_task)
             finally:
-                if not response_task.done():
-                    response_task.cancel()
-                await asyncio.gather(response_task, return_exceptions=True)
+                for task in (response_task, probe_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(response_task, probe_task, return_exceptions=True)
         page.on('response', collect)
         page.on('request', track_request)
         page.on('dialog', detect_rejection)
@@ -760,6 +808,9 @@ class CosmaxAutomation:
             result.update(status=status, detail=f"예약번호 {matches[0]['seq' + col_arg]}")
             self.logger.info(f"[{tab_label}] [{status}] {day} {hour}시 {result['detail']}")
             return result
+        except RecoveredReservation as recovered:
+            result.update(recovered.result)
+            return result
         except Exception as error:
             alerts = self.browser_alerts.get(hour, [])
             rejection = next((message for message in alerts
@@ -768,7 +819,9 @@ class CosmaxAutomation:
                 result.update(status='FAILED', detail=f'{rejection} / 저장 요청 미전송')
             else:
                 result['detail'] = (f"브라우저 경고: {' / '.join(alerts)} / " if alerts else '') + str(error)
-            self.logger.error(f"[{tab_label}] [{result['status']}] {result['detail']}. 이번 실행에서는 추가 저장하지 않습니다.")
+            intent['retryable_http'] = isinstance(error, ResponseError) and error.status in (429, 502, 503, 504)
+            self.state.save_intent(key, intent)
+            self.logger.error(f"[{tab_label}] [{result['status']}] {result['detail']}. 서버 결과를 재조회합니다.")
             failure = RuntimeError(result['detail']).with_traceback(error.__traceback__)
             await self.capture_failure_screenshot(page, failure, '예약_저장', hour)
             return result
@@ -777,7 +830,6 @@ class CosmaxAutomation:
             page.remove_listener('request', track_request)
             page.remove_listener('dialog', detect_rejection)
             rejection_signal.cancel()
-            self.state.finish(key, result['status'], result['detail'])
             await self.save_stage_screenshot(page, hour, 9, 'reservation_result')
 
 

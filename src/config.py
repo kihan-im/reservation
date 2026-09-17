@@ -29,6 +29,15 @@ DEFAULT_CONFIG = {
     "grid_wait_timeout_seconds": 60.0,
     "site_timeout_seconds": 60.0,
     "save_timeout_seconds": 120.0,
+    "save_probe_after_seconds": 10.0,
+    "recovery_timeout_seconds": 600.0,
+    "retry_base_seconds": 2.0,
+    "retry_max_seconds": 15.0,
+    "max_save_attempts": 3,
+    "save_retry_absence_checks": 2,
+    "save_retry_grace_seconds": 5.0,
+    "material_count_by_hour": {},
+    "capture_pre_save_screenshots": False,
     "target_hours": [13, 14, 15],
     "skip_weekends": True,
     "skip_holidays": True,
@@ -50,7 +59,9 @@ def validate_config(config: dict) -> dict:
             len(set(hours)) != len(hours)):
         raise ValueError("target_hours는 중복 없는 시간대 목록이어야 합니다: 8,9,10,11,13,14,15")
     for key in ("keep_alive_interval_seconds", "keep_alive_timeout_seconds", "grid_wait_timeout_seconds",
-                "site_timeout_seconds", "save_timeout_seconds",
+                "site_timeout_seconds", "save_timeout_seconds", "save_probe_after_seconds",
+                "recovery_timeout_seconds", "retry_base_seconds", "retry_max_seconds",
+                "save_retry_grace_seconds",
                 "pre_target_retry_delay_seconds", "viewport_width", "viewport_height"):
         value = config[key]
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
@@ -58,7 +69,19 @@ def validate_config(config: dict) -> dict:
     for key in ("viewport_width", "viewport_height", "max_pre_target_retries"):
         if type(config[key]) is not int or config[key] < 0:
             raise ValueError(f"{key}는 음수가 아닌 정수여야 합니다.")
-    for key in ("headless", "record_video", "dry_run", "skip_weekends", "skip_holidays", "clean_daily_logs"):
+    for key in ("max_save_attempts", "save_retry_absence_checks"):
+        minimum = 2 if key == "save_retry_absence_checks" else 1
+        if type(config[key]) is not int or config[key] < minimum:
+            raise ValueError(f"{key}는 {minimum} 이상의 정수여야 합니다.")
+    if config["retry_base_seconds"] > config["retry_max_seconds"]:
+        raise ValueError("retry_base_seconds는 retry_max_seconds 이하여야 합니다.")
+    targets = config["material_count_by_hour"]
+    if (not isinstance(targets, dict) or any(
+            hour not in ("8", "9", "10", "11", "13", "14", "15")
+            or type(count) is not int or count < 1 for hour, count in targets.items())):
+        raise ValueError("material_count_by_hour는 시간대 문자열과 목표 총 종목 수의 객체여야 합니다.")
+    for key in ("headless", "record_video", "dry_run", "skip_weekends", "skip_holidays",
+                "clean_daily_logs", "capture_pre_save_screenshots"):
         if type(config[key]) is not bool:
             raise ValueError(f"{key}는 true 또는 false여야 합니다.")
     for key in ("url", "reservation_url", "log_dir"):

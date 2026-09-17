@@ -18,6 +18,7 @@ class ReservationState:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS slots (slot TEXT PRIMARY KEY, status TEXT, detail TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS intents (slot TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             # 기존 기록을 병합하되 새 위치에서 갱신한 상태는 덮어쓰지 않는다.
             for legacy_path in dict.fromkeys(map(Path, legacy_paths)):
                 if legacy_path.exists() and legacy_path.resolve() != self.path.resolve():
@@ -63,6 +64,16 @@ class ReservationState:
     def finish(self, key, status, detail=""):
         with self.connect() as db:
             db.execute("INSERT OR REPLACE INTO slots VALUES (?, ?, ?)", (key, status, detail))
+
+    def save_intent(self, key, intent):
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO intents VALUES (?, ?)",
+                       (key, json.dumps(intent, ensure_ascii=False)))
+
+    def get_intent(self, key):
+        with self.connect() as db:
+            row = db.execute("SELECT payload FROM intents WHERE slot=?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None
 
 
 @contextmanager
