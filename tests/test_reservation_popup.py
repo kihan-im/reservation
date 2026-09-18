@@ -9,12 +9,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
-from types import SimpleNamespace
 
 from playwright.async_api import async_playwright
 from src.browser import CosmaxAutomation
 from src.logger import setup_logger, flush_logger_to_disk, generate_html_log
-from src.window_capture import capture_browser_window
 
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
@@ -72,11 +70,12 @@ document.getElementById('ly_popInreservationSelf_btnSelect').onclick = async e =
  loading.style.display='block';
  const response = await fetch('/selectMMIF0015List.do', {method:'POST'});
  let data; try { data = await response.json(); } catch { return; }
- setTimeout(() => {
+  const renderDelay = (window.renderDelays || []).shift() ?? 180;
+  setTimeout(() => {
   if (data.popup !== undefined) notice(data.popup);
   grid.innerHTML=(data.rows || []).map((r,i) => `<tr id="row${i}" data-existing="${!!r.checked}"><td aria-describedby="ly_popInreservationSelf_itemList_grctrl">${r.allowed}</td><td><input type="checkbox" ${r.checked?'checked':''} ${r.allowed==='O' && !r.disabled?'':'disabled'}></td></tr>`).join('');
   loading.style.display='none';
- }, 180);
+  }, renderDelay);
 };
 document.getElementById('ly_popInreservationSelf_btnAdd').onclick = e => {
  record(e,'add'); if (!e.isTrusted) return;
@@ -123,6 +122,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.existing_data = {"rows":[{}, {}, {}]}
         self.requests = []
         self.query_statuses = []
+        self.query_headers = []
         self.query_delays = []
         self.save_delay = 0
         await self.page.route("**/*", self.route)
@@ -148,8 +148,11 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await route.fulfill(content_type="application/json", body=json.dumps(self.wait_data))
         elif path == "/selectInreservationListNew.do":
             await asyncio.sleep(self.query_delays.pop(0) if self.query_delays else 0)
-            await route.fulfill(status=self.query_statuses.pop(0) if self.query_statuses else 200,
-                                content_type="application/json", body=json.dumps(self.list_data))
+            options = dict(status=self.query_statuses.pop(0) if self.query_statuses else 200,
+                           content_type="application/json", body=json.dumps(self.list_data))
+            if self.query_headers:
+                options['headers'] = self.query_headers.pop(0)
+            await route.fulfill(**options)
         elif path == "/selectInReservationItemListNew.do":
             await route.fulfill(content_type="application/json", body=json.dumps(self.existing_data))
         else:
@@ -161,42 +164,32 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.page.evaluate("window.saved"))
         self.assertNotIn("/saveInReservationItemListNew.do", self.requests)
 
-    async def test_native_dialog_is_captured_before_accept_and_failures_do_not_block(self):
-        for mode in ('capture', 'failure', 'headless'):
-            with self.subTest(mode=mode):
-                self.automation.config['headless'] = mode == 'headless'
-                sequence = []
+    async def test_native_dialog_is_accepted_without_waiting_for_capture(self):
+        sequence = []
 
-                async def capture(page, path):
-                    sequence.append('capture')
-                    if mode == 'failure':
-                        raise TimeoutError('capture timeout')
-                    self.assertIn('_13_browser_dialog_', path)
-                    Path(path).write_bytes(b'PNG stub')
-                    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'', b'')))
-                    with patch('src.window_capture.asyncio.create_subprocess_exec', return_value=process):
-                        await capture_browser_window(page, path)
+        async def handle(dialog):
+            sequence.append(dialog.message)
+            await self.automation.handle_browser_dialog(self.page, 13, dialog)
+            sequence.append('accepted')
 
-                async def handle(dialog):
-                    sequence.append(dialog.message)
-                    await self.automation.handle_browser_dialog(self.page, 13, dialog)
-                    sequence.append('accepted')
+        self.page.on('dialog', handle)
+        try:
+            self.assertTrue(await self.page.evaluate("confirm('예약신청 확인')"))
+        finally:
+            self.page.remove_listener('dialog', handle)
+        self.assertEqual(sequence, ['예약신청 확인', 'accepted'])
 
-                self.page.on('dialog', handle)
-                try:
-                    with patch('src.browser.sys.platform', 'win32'), \
-                         patch('src.browser.capture_browser_window', side_effect=capture):
-                        result = await self.page.evaluate("confirm('예약신청 확인')")
-                        self.assertTrue(result)
-                finally:
-                    self.page.remove_listener('dialog', handle)
-                expected = ['예약신청 확인', 'accepted'] if mode == 'headless' else ['예약신청 확인', 'capture', 'accepted']
-                self.assertEqual(sequence, expected)
+    async def test_success_path_skips_stage_screenshots_by_default(self):
+        with patch.object(self.page, 'screenshot', AsyncMock()) as screenshot:
+            path = await self.automation.save_stage_screenshot(self.page, 13, 8, 'save_notice')
+        self.assertEqual(path, '')
+        screenshot.assert_not_awaited()
 
     async def test_artifacts_stay_in_date_hour_folders_across_retries(self):
         root = Path(self.tmp.name) / 'log'
         logger = setup_logger(str(root), [13, 14, 15])
-        config = dict(log_dir=str(root), state_dir=str(Path(self.tmp.name) / '.state'))
+        config = dict(log_dir=str(root), state_dir=str(Path(self.tmp.name) / '.state'),
+                      capture_pre_save_screenshots=True)
         try:
             first = CosmaxAutomation(config, logger)
             paths = []
@@ -290,11 +283,12 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         await self.assert_stops_before_save('조회 권한을 확인하세요')
         self.assertFalse(await self.page.evaluate('window.added'))
 
-    async def test_http_error_stops_before_save(self):
+    async def test_http_error_requeries_once_before_stopping_save(self):
         self.status = 503
         with self.assertLogs('popup-test', level='ERROR') as logs:
-            await self.assert_stops_before_save('HTTP 오류: 503')
+            await self.assert_stops_before_save('자급자재 조회 화면 반영 지연')
         self.assertTrue(any('/selectMMIF0015List.do' in message for message in logs.output))
+        self.assertEqual(self.requests.count('/selectMMIF0015List.do'), 2)
 
     async def test_invalid_json_stops_before_save(self):
         self.raw_body = '<html>error</html>'
@@ -429,12 +423,12 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         retry = {'hour':13, 'day':'20990101', 'status':'RETRY_READY', 'detail':'저장 결과 없음 재조회 2회 확인'}
         confirmed = {'hour':13, 'day':'20990101', 'status':'CONFIRMED', 'detail':'예약번호 12345'}
         with patch.object(self.automation, 'reserve_open_slot', AsyncMock(side_effect=[retry, confirmed])) as reserve, \
-             patch.object(self.automation, 'prepare_reservation_tab', AsyncMock()) as prepare, \
+             patch.object(self.automation, 'activate_reservation_factory', AsyncMock()) as activate, \
              patch.object(self.automation, 'dismiss_retry_notice', AsyncMock()) as dismiss:
             result = await self.automation.reserve_with_recovery(self.page, 13, '20990101', 'slot')
         self.assertEqual(result, confirmed)
         self.assertEqual(reserve.await_count, 2)
-        prepare.assert_awaited_once()
+        activate.assert_awaited_once()
         dismiss.assert_awaited_once()
 
     async def test_retry_closes_visible_site_notice(self):
@@ -444,8 +438,10 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_business_save_failure(self):
         self.save_data = {'returnCode':'FAIL', 'returnMessage':'마감'}
-        result = await self.automation.reserve_single_slot(self.page, 13)
+        with patch.object(self.automation, 'capture_failure_screenshot', AsyncMock()) as capture:
+            result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'FAILED')
+        capture.assert_awaited_once()
 
     async def test_enabled_existing_reservation_loads_items_and_adds_three(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
@@ -593,6 +589,10 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await self.assert_stops_before_save('체크박스가 활성화되지 않았습니다')
         refresh.assert_awaited_once()
 
+    async def test_missing_warehouse_row_reports_missing_checkbox(self):
+        await self.page.locator('#list tr').evaluate('el => el.remove()')
+        await self.assert_stops_before_save('대상 시간대 체크박스가 없습니다')
+
     async def test_wrong_warehouse_stops_before_save(self):
         await self.page.locator('#ly_popInreservationMain_srchFacgubn').evaluate("el=>el.value='2'")
         await self.assert_stops_before_save('예약 정보 불일치')
@@ -625,6 +625,42 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data, self.list_data)
         self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 1)
 
+    async def test_list_retry_honors_retry_after_header(self):
+        self.query_statuses = [429, 200]
+        self.query_headers = [{'Retry-After': '0'}]
+        with self.assertLogs('popup-test', level='WARNING') as logs:
+            await self.automation.refresh_reservation_list(self.page, 13)
+        self.assertIn('Retry-After 0', '\n'.join(logs.output))
+        self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 2)
+
+    async def test_list_retry_uses_short_delay_for_gateway_errors(self):
+        self.query_statuses = [503, 200]
+        with patch('src.browser.retry_delay', return_value=0) as delay:
+            await self.automation.refresh_reservation_list(self.page, 13)
+        delay.assert_called_once_with(0, .5, 1)
+
+    async def test_list_refresh_records_response_and_render_timing(self):
+        with self.assertLogs('popup-test', level='INFO') as logs:
+            await self.automation.refresh_reservation_list(self.page, 13)
+        timing = '\n'.join(logs.output)
+        self.assertIn('[TIMING] 예약 목록 AJAX 시작', timing)
+        self.assertIn('[TIMING] 예약 목록 응답 수신', timing)
+        self.assertIn('[TIMING] 체크박스 화면 반영', timing)
+
+    async def test_delayed_material_grid_requeries_once_in_current_tab(self):
+        self.automation.site_timeout_ms = 300
+        await self.page.evaluate("window.renderDelays = [700, 0]")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        self.assertEqual(self.requests.count('/selectMMIF0015List.do'), 2)
+
+    async def test_material_grid_waits_for_a_slow_render_before_requerying(self):
+        self.automation.site_timeout_ms = 1000
+        await self.page.evaluate("window.renderDelays = [700]")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        self.assertEqual(self.requests.count('/selectMMIF0015List.do'), 1)
+
     async def test_read_only_query_retries_temporary_overload_and_timeout(self):
         for failure in ('overload', 'timeout'):
             with self.subTest(failure=failure):
@@ -648,6 +684,13 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'CONFIRMED')
         self.assertEqual(self.requests.count('/saveInReservationItemListNew.do'), 1)
         self.assertIn('[WAITING]', '\n'.join(logs.output))
+
+    async def test_successful_save_waits_for_response_before_any_server_probe(self):
+        self.save_delay = .2
+        with patch.object(self.automation, 'observe_slow_save', AsyncMock()) as probe:
+            result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        probe.assert_not_awaited()
 
     async def test_save_deadline_keeps_unknown_and_never_retries_write(self):
         self.automation.save_timeout_seconds = 0.15

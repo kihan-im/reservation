@@ -33,6 +33,13 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(load_config(path)['grid_wait_timeout_seconds'], 60.0)
             self.assertEqual(json.loads(path.read_text())['grid_wait_timeout_seconds'], 5)
 
+    def test_legacy_exact_ten_oclock_start_is_delayed_one_second_without_rewriting_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'config.json'
+            path.write_text(json.dumps({'target_time': '10:00:00'}))
+            self.assertEqual(load_config(path)['target_time'], '10:00:01')
+            self.assertEqual(json.loads(path.read_text())['target_time'], '10:00:00')
+
     def test_invalid_config_fails_closed(self):
         for key, value in [('target_time','25:00:00'), ('target_hours',[]), ('target_hours',[13,13]),
                            ('target_hours',[12]), ('grid_wait_timeout_seconds',-1),

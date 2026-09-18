@@ -194,7 +194,7 @@ class ReservationRecoveryMixin:
             self.slot_attempts[hour] = attempt + 1
             if attempt:
                 await self.dismiss_retry_notice(page, hour)
-                await self.prepare_reservation_tab(page, hour)
+                await self.activate_reservation_factory(page, hour)
             result = await self.reserve_open_slot(page, hour, day, key)
             if result["status"] == "UNKNOWN":
                 result = await self.recover_unknown(page, hour, day, key, result)

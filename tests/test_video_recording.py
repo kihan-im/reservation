@@ -21,7 +21,7 @@ class VideoRecordingTest(unittest.IsolatedAsyncioTestCase):
             if login_error:
                 raise RuntimeError('local login failed')
 
-        async def prepare(page, hour):
+        async def prepare(page, hour, **_):
             await page.set_content(f'<h1>{hour} reservation</h1>')
             await page.wait_for_timeout(300)
 
@@ -36,6 +36,7 @@ class VideoRecordingTest(unittest.IsolatedAsyncioTestCase):
              patch.object(CosmaxAutomation, 'perform_login', side_effect=login), \
              patch.object(CosmaxAutomation, 'verify_session', AsyncMock()), \
              patch.object(CosmaxAutomation, 'prepare_reservation_tab', side_effect=prepare), \
+             patch.object(CosmaxAutomation, 'activate_reservation_factory', AsyncMock()), \
              patch.object(CosmaxAutomation, 'reserve_single_slot', side_effect=reserve):
             return await execute_automation(config, logging.getLogger('local-video'))
 

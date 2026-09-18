@@ -20,7 +20,7 @@ DEFAULT_CONFIG = {
     "reservation_url": "https://ebiz.cosmax.com/inreservationReg/inreservationRegListNew.do?gblCompid=1200&TMENU=M00003&LMENU=M00084",
     "user_id": "S102190",
     "user_pw": "90801277**//123",
-    "target_time": "10:00:00",
+    "target_time": "10:00:01",
     "keep_alive_interval_seconds": 30,
     "log_dir": "log",
     "headless": False,
@@ -113,6 +113,9 @@ def load_config(config_path="config.json") -> dict:
         if not isinstance(user_config, dict):
             raise ValueError("설정 파일의 최상위 값은 JSON 객체여야 합니다.")
         config.update(user_config)
+        if user_config.get("target_time") == "10:00:00":
+            config["target_time"] = "10:00:01"
+            logger.info("기존 target_time 10:00:00을 예약 시작 시각 10:00:01로 적용합니다.")
     validate_config(config)
     if config["grid_wait_timeout_seconds"] < MIN_GRID_WAIT_TIMEOUT_SECONDS:
         logger.warning("grid_wait_timeout_seconds가 60초 미만이어서 60초로 보정합니다.")
