@@ -221,6 +221,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(list(root.glob('*/*'))), 3)
 
     async def reserve_and_check_notice_capture(self, expected_text):
+        self.automation.config['capture_pre_save_screenshots'] = True
         await self.page.evaluate("""() => {
             const show = window.notice;
             window.notice = text => setTimeout(() => show(text), 150);
@@ -297,7 +298,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_json_stops_before_save(self):
         self.raw_body = '<html>error</html>'
-        await self.assert_stops_before_save('JSON이 아닙니다')
+        await self.assert_stops_before_save('JSON 응답을 확인할 수 없습니다')
 
     async def test_business_failure_without_rows_preserves_reason(self):
         self.data = {'returnCode':'FAIL', 'returnMessage':'조회 실패 원인'}
@@ -346,6 +347,19 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(selected, ['row0','row1','row2','row3','row4'])
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr').count(), 5)
+
+    async def test_concurrent_count_change_only_requires_an_increase_after_add(self):
+        self.automation.config['material_count_by_hour'] = {'13': 3}
+        await self.page.evaluate("""() => {
+            const button = document.getElementById('ly_popInreservationSelf_btnAdd');
+            const add = button.onclick;
+            button.onclick = event => {
+                add(event);
+                document.getElementById('ly_popInreservationMain_itemcntTotal').value = '2';
+            };
+        }""")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
 
     async def test_add_notice_stops_before_save(self):
         await self.page.evaluate('window.rejectAdd=true')
@@ -585,14 +599,12 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(message, result['detail'])
         self.assertIn('/saveInReservationItemListNew.do', self.requests)
 
-    async def test_disabled_existing_reservation_still_stops(self):
+    async def test_disabled_existing_reservation_stops_without_internal_requery(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
         await self.page.locator('#list input[type="checkbox"]').evaluate('el=>el.disabled=true')
-        self.automation.config['grid_wait_timeout_seconds'] = 0.5
-        # 조회 지연은 별도 테스트에서 검사한다. 여기서는 조회 후에도 비활성인 슬롯만 검증한다.
         with patch.object(self.automation, 'refresh_reservation_list', AsyncMock(return_value=self.list_data)) as refresh:
             await self.assert_stops_before_save('체크박스가 활성화되지 않았습니다')
-        refresh.assert_awaited_once()
+        refresh.assert_not_awaited()
 
     async def test_missing_warehouse_row_reports_missing_checkbox(self):
         await self.page.locator('#list tr').evaluate('el => el.remove()')
@@ -614,14 +626,6 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_warehouse_stops_before_save(self):
         await self.page.locator('#ly_popInreservationMain_srchFacgubn').evaluate("el=>el.value='2'")
         await self.assert_stops_before_save('예약 정보 불일치')
-
-    async def test_grid_timeout_bounds_slow_reload(self):
-        self.automation.config['grid_wait_timeout_seconds'] = 0.1
-        await self.page.locator('#list input[type="checkbox"]').evaluate('el=>el.disabled=true')
-        self.query_delays = [0.5]
-        start = asyncio.get_running_loop().time()
-        await self.assert_stops_before_save('예약 목록 조회 지연.*마감 여부 미확인')
-        self.assertLess(asyncio.get_running_loop().time()-start, 1)
 
     async def test_list_waits_for_late_slot_masking_before_using_checkbox(self):
         await self.page.evaluate("""() => {
@@ -689,15 +693,8 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await self.automation.refresh_reservation_list(self.page, 13)
         self.assertIn('[NETWORK] 요청 실패 POST /selectInreservationListNew.do', '\n'.join(logs.output))
 
-    async def test_delayed_material_grid_requeries_once_in_current_tab(self):
+    async def test_material_grid_waits_past_site_timeout_without_requerying(self):
         self.automation.site_timeout_ms = 300
-        await self.page.evaluate("window.renderDelays = [700, 0]")
-        result = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(result['status'], 'CONFIRMED')
-        self.assertEqual(self.requests.count('/selectMMIF0015List.do'), 2)
-
-    async def test_material_grid_waits_for_a_slow_render_before_requerying(self):
-        self.automation.site_timeout_ms = 1000
         await self.page.evaluate("window.renderDelays = [700]")
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'CONFIRMED')

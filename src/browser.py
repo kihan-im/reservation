@@ -548,8 +548,6 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         page.on("response", log_error_response)
         step = "자급자재 창 열기"
         try:
-            main_rows = page.locator('#ly_popInreservationMain_itemList tr[id]')
-            main_rows_before = await main_rows.count()
             main_count_before = await self.read_material_count(page, hour)
             limit = await self.validate_material_limit(page, hour, main_count_before)
             remaining = limit - main_count_before
@@ -575,14 +573,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                     self.logger.info(f"[{hour}시 탭] 자급자재 조회 응답: HTTP {response.status}")
                     if not response.ok:
                         raise ResponseError(f"[{hour}시 탭] 자급자재 조회", response)
-                    try:
-                        data = await asyncio.wait_for(response.json(), timeout=1.5)
-                    except asyncio.TimeoutError as error:
-                        raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 응답 본문 수신 시간이 초과되었습니다.") from error
-                    except Exception as error:
-                        raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 응답이 JSON이 아닙니다.") from error
-                    if not isinstance(data, dict):
-                        raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 응답 형식이 올바르지 않습니다.")
+                    data = await self.read_json_response(response, f"[{hour}시 탭] 자급자재 조회", timeout=0)
                     if data.get("returnCode") in ("FAIL", "NOSES"):
                         message = data.get("returnMessage") or "오류 메시지 없음"
                         raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 실패: {data['returnCode']} - {message}")
@@ -591,14 +582,23 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                     if not data["rows"]:
                         raise RuntimeError(f"[{hour}시 탭] 조회된 자급자재가 없습니다.")
 
-                    await page.wait_for_function("""() => {
-                        const notice = document.getElementById('lyNoti');
-                        if (notice && notice.getClientRects().length && getComputedStyle(notice).visibility !== 'hidden') return true;
-                        const loading = document.getElementById('load_ly_popInreservationSelf_itemList');
-                        return (!loading || !loading.getClientRects().length)
-                            && Boolean(document.querySelector('#ly_popInreservationSelf_itemList tr[id] input[type="checkbox"]'));
-                    }""", timeout=self.site_timeout_ms)
-                    await self.check_site_notice(page, hour, step)
+                    next_log = asyncio.get_running_loop().time() + 10
+                    while True:
+                        if "loginForm.do" in page.url or await page.locator("#passwd").is_visible():
+                            raise RuntimeError(f"[{hour}시 탭] 자급자재 조회 중 세션이 종료되었습니다.")
+                        await self.check_site_notice(page, hour, step)
+                        ready = await page.evaluate("""() => {
+                            const loading = document.getElementById('load_ly_popInreservationSelf_itemList');
+                            return (!loading || !loading.getClientRects().length)
+                                && Boolean(document.querySelector('#ly_popInreservationSelf_itemList tr[id] input[type="checkbox"]'));
+                        }""")
+                        if ready:
+                            break
+                        if asyncio.get_running_loop().time() >= next_log:
+                            self.logger.warning(
+                                f"[{hour}시 탭] [WAITING] 자급자재 조회 화면 반영 지연: 조회중 상태가 끝날 때까지 계속 대기")
+                            next_log += 10
+                        await asyncio.sleep(.25)
                     break
                 except (PlaywrightError, ResponseError) as error:
                     if grid_attempt:
@@ -628,7 +628,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
             target = self.config.get("material_count_by_hour", {}).get(str(hour))
             if target is not None and not minimum <= target <= limit:
                 raise RuntimeError(f"[{hour}시 탭] 설정 종목 수 {target}개가 사이트 허용 범위 {minimum}~{limit}개 밖입니다.")
-            desired = max(3, minimum - main_count_before) if target is None else max(0, target - main_count_before)
+            desired = min(3, remaining) if target is None else min(3, max(0, target - main_count_before))
             add_count = min(desired, remaining, count)
             if target is not None and main_count_before >= target:
                 return 0
@@ -636,7 +636,6 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                 raise RuntimeError(f"[{hour}시 탭] 추가 가능한 미선택 납품허용 자급자재가 없습니다. (기존 {main_count_before}개 / 허용 {limit}개)")
             if target is not None and main_count_before + add_count < target:
                 raise RuntimeError(f"[{hour}시 탭] 목표 {target}개에 필요한 선택 가능 자재가 부족합니다.")
-            expected_main_count = main_rows_before + add_count
             if main_count_before + add_count <= int(minimum_text):
                 raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량 미달: 추가 후 {main_count_before + add_count}개 / 최소 {int(minimum_text) + 1}개. 저장 생략")
             expected_count = checked_count + add_count
@@ -655,22 +654,18 @@ class CosmaxAutomation(ReservationRecoveryMixin):
             await self.click_reservation_button(
                 page, hour, "#ly_popInreservationSelf_btnAdd", step
             )
-            await page.wait_for_function("""(expectedCount) => {
+            await page.wait_for_function("""(previousCount) => {
                 const notice = document.getElementById('lyNoti');
                 if (notice && notice.getClientRects().length && getComputedStyle(notice).visibility !== 'hidden') return true;
                 const subModal = document.getElementById('ly_popInreservationSelf');
-                const rows = document.querySelectorAll('#ly_popInreservationMain_itemList tr[id]');
-                return subModal && !subModal.getClientRects().length && rows.length >= expectedCount;
-            }""", arg=expected_main_count, timeout=self.site_timeout_ms)
+                const total = document.getElementById('ly_popInreservationMain_itemcntTotal');
+                return subModal && !subModal.getClientRects().length
+                    && total && Number(total.value) > previousCount;
+            }""", arg=main_count_before, timeout=self.site_timeout_ms)
             await self.check_site_notice(page, hour, step)
-            main_rows_after = await main_rows.count()
-            if main_rows_after != expected_main_count:
-                raise RuntimeError(f"[{hour}시 탭] 자급자재 추가 확인 실패: 기존 {main_rows_before}행 + 신규 {add_count}행, 실제 {main_rows_after}행")
             main_count_after = await self.read_material_count(page, hour)
-            if target is not None and main_count_after != target:
-                raise RuntimeError(f"[{hour}시 탭] 실제 종목 수 {main_count_after}개가 목표 {target}개와 다릅니다.")
-            if main_count_after <= int(minimum_text):
-                raise RuntimeError(f"[{hour}시 탭] 일반품목 최소 수량 미달: 현재 {main_count_after}개 / 최소 {int(minimum_text) + 1}개. 저장 생략")
+            if main_count_after <= main_count_before:
+                raise RuntimeError(f"[{hour}시 탭] 자급자재 추가 후 종목 수가 증가하지 않았습니다. 저장 생략")
             self.logger.info(f"[{hour}시 탭] 메인 예약창 자급자재 추가 완료: 기존 종목 {main_count_before}개 / 체크박스 {add_count}개 추가 / 현재 종목 {main_count_after}개")
             await self.save_stage_screenshot(page, hour, 6, "materials_added_to_main")
             return add_count
@@ -812,24 +807,11 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         async def slot_available():
             return (await checkbox.count() and await checkbox.is_enabled()
                     and await open_button.count() and await open_button.is_visible())
-        query_pending = False
-        poll_delay = 1
-        try:
-            async with asyncio.timeout(self.config.get('grid_wait_timeout_seconds', 60)):
-                while not await slot_available():
-                    await self.check_site_notice(page, hour, '시간대 활성화 대기')
-                    query_pending = True
-                    await self.refresh_reservation_list(page, hour)
-                    query_pending = False
-                    if await slot_available():
-                        break
-                    self.logger.info(f"[{tab_label}] 시간대 활성화 대기: {poll_delay}초 후 목록 재조회")
-                    await asyncio.sleep(poll_delay)
-                    poll_delay = min(poll_delay * 2, 4)
-        except TimeoutError as error:
-            if query_pending:
-                raise RuntimeError(f"[{tab_label}] 예약 목록 조회 지연으로 대기 한도에 도달했습니다. 마감 여부 미확인") from error
-            raise RuntimeError(f"[{tab_label}] 대상 시간대 체크박스가 활성화되지 않았습니다. (마감 또는 미오픈)") from error
+        if not await slot_available():
+            await self.check_site_notice(page, hour, '시간대 활성화 대기')
+            if not await checkbox.count() or not await open_button.count():
+                raise RuntimeError(f"[{tab_label}] 대상 시간대 체크박스가 없습니다. (마감 또는 미오픈)")
+            raise RuntimeError(f"[{tab_label}] 대상 시간대 체크박스가 활성화되지 않았습니다. (마감 또는 미오픈)")
         seq = (await row.locator(f'[aria-describedby="list_seq{col_arg}"]').text_content()).strip()
         existing_reservation = bool(seq and seq != '0')
         await checkbox.check(timeout=self.site_timeout_ms)
