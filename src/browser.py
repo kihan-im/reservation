@@ -7,6 +7,7 @@ import os
 import asyncio
 import logging
 import time
+import re
 from statistics import median
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -27,6 +28,8 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         self.submitted_hours = set()
         self.browser_alerts = {}
         self.dialog_pages = set()
+        self.network_pages = set()
+        self.network_state = {}
         self.slot_attempts = {}
         self.slot_write_attempts = {}
         self.slot_timing_started = {}
@@ -117,6 +120,60 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         now = time.monotonic()
         started = self.slot_timing_started.setdefault(hour, now)
         self.logger.info(f"[{hour}시 탭] [TIMING] {event}: +{now - started:.3f}초")
+
+    def list_recovery_delay(self, hour: int) -> float:
+        hours = sorted(self.config.get('target_hours', [13, 14, 15]))
+        if len(hours) == 1:
+            return 2
+        return 2 + 3 * hours.index(hour) / (len(hours) - 1)
+
+    def monitor_network(self, page, hour: int):
+        """예약 조회 요청의 상태를 headless/headful에서 같은 형식으로 기록한다."""
+        if page in self.network_pages:
+            return
+        self.network_pages.add(page)
+        self.network_state[page] = {}
+        mode = 'headless' if self.config.get('headless', False) else 'headful'
+
+        def relevant(url):
+            path = urlsplit(url).path
+            return path.endswith(('selectInreservationListNew.do',
+                                   'selectInReservationItemListNew.do',
+                                   'selectMMIF0015List.do'))
+
+        def on_request(request):
+            if request.resource_type not in ('xhr', 'fetch') or not relevant(request.url):
+                return
+            path = urlsplit(request.url).path
+            self.network_state[page][path] = {'failure': '', 'mode': mode}
+            self.logger.info(f"[{hour}시 탭] [NETWORK] 요청 {request.method} {path} ({mode})")
+
+        def on_response(response):
+            if response.request.resource_type not in ('xhr', 'fetch') or not relevant(response.url):
+                return
+            path = urlsplit(response.url).path
+            headers = response.headers
+            safe_headers = ', '.join(
+                f'{name}={headers[name]}' for name in ('date', 'retry-after', 'content-type', 'server')
+                if headers.get(name)) or '기록할 응답 헤더 없음'
+            state = self.network_state[page].setdefault(path, {})
+            state.update(status=response.status, headers=safe_headers, mode=mode)
+            self.logger.info(
+                f"[{hour}시 탭] [NETWORK] 응답 HTTP {response.status} {path} "
+                f"({mode}; {safe_headers})")
+
+        def on_failed(request):
+            if request.resource_type not in ('xhr', 'fetch') or not relevant(request.url):
+                return
+            path = urlsplit(request.url).path
+            failure = request.failure or '원인 정보 없음'
+            self.network_state[page].setdefault(path, {})['failure'] = failure
+            self.logger.error(
+                f"[{hour}시 탭] [NETWORK] 요청 실패 {request.method} {path} ({mode}): {failure}")
+
+        page.on('request', on_request)
+        page.on('response', on_response)
+        page.on('requestfailed', on_failed)
 
     async def launch_browser(self, playwright_obj):
         """Playwright 브라우저 고속 실행 (Chromium 경량화 가속 플래그 적용)"""
@@ -266,6 +323,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         if page not in self.dialog_pages:
             page.on("dialog", handle_dialog)
             self.dialog_pages.add(page)
+        self.monitor_network(page, hour)
 
         reservation_url = self.config.get("reservation_url")
         if reservation_url:
@@ -305,18 +363,31 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         self.record_slot_timing(hour, '예약 목록 AJAX 시작')
         response = await self.query_response(
             page, hour, '#btnSelect', '예약 목록 조회',
-            lambda r: urlsplit(r.url).path.endswith('/selectInreservationListNew.do')
+            '/selectInreservationListNew.do'
         )
         self.record_slot_timing(hour, f'예약 목록 응답 수신 (HTTP {response.status})')
-        data = await self.read_json_response(response, "예약 목록 조회")
+        data = await self.read_json_response(response, "예약 목록 조회", timeout=0)
         if data.get("returnCode") in ("FAIL", "NOSES") or not isinstance(data.get("rows"), list):
             raise RuntimeError(f"[{hour}시 탭] 예약 목록 조회 실패: {data.get('returnMessage', '')}")
-        await page.locator('table#list tr[id="1"]').wait_for(state='attached', timeout=self.site_timeout_ms)
-        await page.locator('#load_list').wait_for(state='hidden', timeout=self.site_timeout_ms)
-        # 사이트는 목록 로딩 후 별도 AJAX로 마감 슬롯의 체크박스/등록 링크를 제거한다.
-        await page.wait_for_function('() => !window.jQuery || window.jQuery.active === 0',
-                                     timeout=self.site_timeout_ms)
-        await self.check_site_notice(page, hour, "예약 목록 조회")
+        next_log = asyncio.get_running_loop().time() + 10
+        while True:
+            if "loginForm.do" in page.url or await page.locator("#passwd").is_visible():
+                raise RuntimeError(f"[{hour}시 탭] 예약 목록 조회 중 세션이 종료되었습니다.")
+            await self.check_site_notice(page, hour, "예약 목록 조회")
+            ready = await page.evaluate("""() => {
+                const loading = document.querySelector('#load_list');
+                const loadingVisible = loading && loading.getClientRects().length;
+                const row = document.querySelector('table#list tr[id="1"]');
+                const ajaxDone = !window.jQuery || window.jQuery.active === 0;
+                return Boolean(row && !loadingVisible && ajaxDone);
+            }""")
+            if ready:
+                break
+            if asyncio.get_running_loop().time() >= next_log:
+                self.logger.warning(
+                    f"[{hour}시 탭] [WAITING] 예약 목록 화면 반영 지연: 조회중 상태가 끝날 때까지 계속 대기")
+                next_log += 10
+            await asyncio.sleep(.25)
         self.record_slot_timing(hour, '체크박스 화면 반영')
         return data
 
@@ -352,31 +423,45 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                 await asyncio.sleep(min(remaining, 0.02 if remaining <= 1 else 1))
         self.logger.info(f"목표 시각 {self.config.get('target_time', '10:00:01')} 도달. 예약을 시작합니다.")
 
-    async def wait_with_progress(self, awaitable, hour, step):
+    async def wait_with_progress(self, awaitable, hour, step, page=None, request_path=''):
         """같은 요청을 기다리는 동안 진행 로그를 남긴다. 새 요청은 보내지 않는다."""
         task = asyncio.ensure_future(awaitable)
         elapsed = 0
         try:
+            next_log = asyncio.get_running_loop().time() + 10
             while not task.done():
-                done, _ = await asyncio.wait({task}, timeout=10)
+                done, _ = await asyncio.wait({task}, timeout=.25 if page else 10)
                 if not done:
-                    elapsed += 10
-                    self.logger.warning(f"[{hour}시 탭] [WAITING] {step}: {elapsed}초 응답 지연, 기존 요청 계속 대기")
+                    if page:
+                        if "loginForm.do" in page.url or await page.locator("#passwd").is_visible():
+                            raise RuntimeError(f"[{hour}시 탭] {step} 중 세션이 종료되었습니다.")
+                        await self.check_site_notice(page, hour, step)
+                        failure = self.network_state.get(page, {}).get(request_path, {}).get('failure')
+                        if failure:
+                            raise RuntimeError(f"[{hour}시 탭] {step} 요청 실패: {failure}")
+                    if asyncio.get_running_loop().time() >= next_log:
+                        elapsed += 10
+                        self.logger.warning(f"[{hour}시 탭] [WAITING] {step}: {elapsed}초 응답 지연, 기존 요청 계속 대기")
+                        next_log += 10
             return await task
         finally:
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    async def query_response(self, page, hour, selector, step, matcher, *, timeout_ms=None, attempts=3):
-        """읽기 전용 조회만 일시적 과부하/시간 초과 시 최대 3회 시도한다."""
-        timeout_ms = timeout_ms or self.site_timeout_ms
+    async def query_response(self, page, hour, selector, step, request_path, *, timeout_ms=None, attempts=3):
+        """조회중에는 기존 요청을 기다리고, 명확한 HTTP/통신 실패만 재시도한다."""
+        self.monitor_network(page, hour)
+        timeout_ms = 0 if timeout_ms is None else timeout_ms
+        matcher = lambda response: (response.request.method == 'POST'
+                                    and urlsplit(response.url).path.endswith(request_path))
         for attempt in range(attempts):
             response = None
             try:
                 async with page.expect_response(matcher, timeout=timeout_ms) as info:
                     await self.click_reservation_button(page, hour, selector, step)
-                    response = await self.wait_with_progress(info.value, hour, step)
+                    response = await self.wait_with_progress(
+                        info.value, hour, step, page=page, request_path=request_path)
                 if not (response.status in (408, 429) or response.status >= 500) or attempt == attempts - 1:
                     return response
                 reason = f'HTTP {response.status}'
@@ -397,7 +482,9 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                                             self.config.get("retry_max_seconds", 15))
                 reason = f'{reason}, Retry-After {retry_after or "없음"}'
             elif response is not None and response.status in (502, 503, 504):
-                delay = retry_delay(attempt, .5, 1)
+                delay = (self.list_recovery_delay(hour)
+                         if request_path == '/selectInreservationListNew.do'
+                         else retry_delay(attempt, .5, 1))
             else:
                 delay = retry_delay(attempt, self.config.get("retry_base_seconds", 2),
                                     self.config.get("retry_max_seconds", 15))
@@ -408,7 +495,11 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         if not response.ok:
             raise ResponseError(step, response)
         try:
-            data = await asyncio.wait_for(response.json(), timeout=timeout or self.site_timeout_ms / 1000)
+            if timeout == 0:
+                data = await response.json()
+            else:
+                data = await asyncio.wait_for(
+                    response.json(), timeout=timeout or self.site_timeout_ms / 1000)
         except Exception as error:
             raise RuntimeError(f"{step} JSON 응답을 확인할 수 없습니다.") from error
         if not isinstance(data, dict):
@@ -421,6 +512,12 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         if await notice.is_visible():
             message = " ".join(await notice.locator("p").all_text_contents()).strip()
             message = message or "내용 없는 알림 (통신 오류 또는 서버 응답 확인 필요)"
+            list_path = '/selectInreservationListNew.do'
+            state = self.network_state.get(page, {}).get(list_path, {})
+            self.logger.error(
+                f"[{hour}시 탭] [NETWORK] 사이트 알림 시점 마지막 목록 요청: {list_path}, "
+                f"HTTP={state.get('status', '응답 없음')}, 실패={state.get('failure') or '없음'}, "
+                f"모드={state.get('mode', '알 수 없음')}, 헤더={state.get('headers', '없음')}")
             raise RuntimeError(f"[{hour}시 탭] {step}: 사이트 알림 - {message}")
 
     async def click_reservation_button(self, page, hour: int, selector: str, step: str):
@@ -472,8 +569,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                 try:
                     response = await self.query_response(
                         page, hour, '#ly_popInreservationSelf_btnSelect', step,
-                        lambda response: response.request.method == "POST"
-                        and response.url.split("?", 1)[0].endswith("/selectMMIF0015List.do"),
+                        '/selectMMIF0015List.do',
                         attempts=1,
                     )
                     self.logger.info(f"[{hour}시 탭] 자급자재 조회 응답: HTTP {response.status}")
@@ -627,9 +723,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         """기존 예약 품목을 먼저 읽어 자급자재 조회 시 기존 체크가 반영되게 한다."""
         response = await self.query_response(
             page, hour, '#ly_popInreservationMain_btnSelect', '기존 예약 품목 조회',
-            lambda r: r.request.method == 'POST'
-            and urlsplit(r.url).path.endswith('/selectInReservationItemListNew.do')
-            and parse_qs(r.request.post_data or '').get('srchSeq') == [seq]
+            '/selectInReservationItemListNew.do'
         )
         data = await self.read_json_response(response, '기존 예약 품목 조회')
         if data.get('returnCode') in ('FAIL', 'NOSES') or not isinstance(data.get('rows'), list):
@@ -698,11 +792,15 @@ class CosmaxAutomation(ReservationRecoveryMixin):
     async def reserve_open_slot(self, page, hour, day, key):
         tab_label = f"{hour}시 탭"
         col_arg = str({8: 1, 9: 2, 10: 3, 11: 4, 13: 5, 14: 6, 15: 7}[hour])
-        rows = page.locator(
-            'table#list tr[id]:has(td[aria-describedby="list_facgubn"]:text-is("1"))')
+        rows = page.locator('table#list tr[id]').filter(
+            has=page.locator('td[aria-describedby="list_facgubn"]', has_text=re.compile(r'^\s*1\s*$'))
+        ).filter(
+            has=page.locator('td[aria-describedby="list_comptype"]',
+                             has_text=re.compile(r'^\s*(?:C2|일반품목)\s*$'))
+        )
         row_count = await rows.count()
         if row_count == 0:
-            raise RuntimeError(f"[{tab_label}] 대상 시간대 체크박스가 없습니다. (청북2층 예약 행 미표시)")
+            raise RuntimeError(f"[{tab_label}] 청북2층 일반품목 예약 행이 없습니다.")
         if row_count > 1:
             raise RuntimeError(f"[{tab_label}] 청북2층 예약 행이 여러 개여서 처리할 수 없습니다.")
         row = rows.first
@@ -922,7 +1020,7 @@ async def execute_automation(config: dict, logger: logging.Logger):
     Playwright 초고속 멀티탭 병렬 예약 오케스트레이션
     - 리소스 차단(폰트/미디어)으로 3개 탭 기동 가속
     - 1회 로그인 후 13시, 14시, 15시 3개 탭 생성
-    - 서버 시계 10:00:00 정각 동시 예약 트리거 (asyncio.gather)
+    - 서버 시계 목표 시각에 각 시간대 예약을 병렬 트리거 (asyncio.gather)
     - 시간대별 최종 화면 저장
     """
     from playwright.async_api import async_playwright
@@ -1000,10 +1098,13 @@ async def execute_automation(config: dict, logger: logging.Logger):
                     0, (target - current).total_seconds()) + retry_window
                 attempt = 0
                 unavailable_attempts = 0
+                blank_notice_attempts = 0
                 needs_navigation = True
                 factory_active = False
                 target_waited = False
                 while True:
+                    blank_notice = False
+                    staggered_recovery = False
                     try:
                         if needs_navigation:
                             phase = '사전_준비'
@@ -1033,20 +1134,31 @@ async def execute_automation(config: dict, logger: logging.Logger):
                         detail = str(error)
                         unavailable = ('대상 시간대 체크박스가 없습니다.' in detail
                                        or '대상 시간대 체크박스가 활성화되지 않았습니다.' in detail)
+                        blank_notice = '내용 없는 알림' in detail
+                        staggered_recovery = (blank_notice
+                                              or '예약 목록 조회 요청 실패' in detail)
+                        terminal_layout = ('청북2층 예약 행이 여러 개' in detail
+                                           or '청북2층 일반품목 예약 행이 없습니다.' in detail)
                         if unavailable:
                             unavailable_attempts += 1
+                        if blank_notice:
+                            blank_notice_attempts += 1
                         result = dict(hour=hour,
                                       status='UNKNOWN' if hour in automation.submitted_hours else 'FAILED',
                                       detail=detail)
                         if unavailable:
                             result['retryable'] = unavailable_attempts < 2
-                        if '자급자재 조회 화면 반영 지연' in detail:
+                        if blank_notice:
+                            result['retryable'] = blank_notice_attempts < 2
+                        if terminal_layout or '자급자재 조회 화면 반영 지연' in detail:
                             result['retryable'] = False
                     if (config.get('dry_run') or result.get('retryable') is False
                             or result['status'] not in ('FAILED', 'UNKNOWN', 'SUBMITTING')
                             or asyncio.get_running_loop().time() >= retry_deadline):
                         break
                     attempt += 1
+                    if blank_notice:
+                        await automation.dismiss_retry_notice(page, hour)
                     if "loginForm.do" in page.url or await page.locator("#passwd").is_visible():
                         try:
                             async with session_recovery_lock:
@@ -1058,9 +1170,12 @@ async def execute_automation(config: dict, logger: logging.Logger):
                                     factory_active = False
                         except Exception as error:
                             logger.warning(f"[{hour}시 탭] 재로그인 실패: {error}")
-                    retry_base, retry_max = ((0.5, 1) if phase == '예약_목록_활성화' else (1, 15))
-                    delay = min(retry_delay(attempt, retry_base, retry_max),
-                                max(0, retry_deadline - asyncio.get_running_loop().time()))
+                    if staggered_recovery:
+                        delay = automation.list_recovery_delay(hour)
+                    else:
+                        retry_base, retry_max = ((0.5, 1) if phase == '예약_목록_활성화' else (1, 15))
+                        delay = retry_delay(attempt, retry_base, retry_max)
+                    delay = min(delay, max(0, retry_deadline - asyncio.get_running_loop().time()))
                     if delay <= 0:
                         break
                     logger.warning(

@@ -18,13 +18,14 @@ from src.logger import setup_logger, flush_logger_to_disk, generate_html_log
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
 #lyNoti { display:none; position:fixed; inset:20px; z-index:90; background:white; }
 #ly_popInreservationSelf { display:none; position:absolute; inset:20px; z-index:80; background:white; }
-#load_ly_popInreservationSelf_itemList {display:none}
+#load_list, #load_ly_popInreservationSelf_itemList {display:none}
 </style></head><body>
 <div class="tabWrap"><ul><li class="active"><a id="atab1">예약목록</a></li></ul></div>
 <input id="srchReservDay" value="20990101">
 <button id="btnSelect">목록 조회</button>
+<div id="load_list">조회중...</div>
 <table id="list"><tr id="1"><td aria-describedby="list_checkYn5"><input type="checkbox"></td>
-<td aria-describedby="list_facgubn">1</td><td aria-describedby="list_seq5"></td>
+<td aria-describedby="list_facgubn">1</td><td aria-describedby="list_comptype">일반품목</td><td aria-describedby="list_seq5"></td>
 <td aria-describedby="list_cobut5"><a href="#" id="openMain">등록</a></td></tr></table>
 <div id="ly_popInreservationMain" style="display:none">
 <input id="ly_popInreservationMain_srchReservDay" value="20990101">
@@ -124,6 +125,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.query_statuses = []
         self.query_headers = []
         self.query_delays = []
+        self.query_abort = False
         self.save_delay = 0
         await self.page.route("**/*", self.route)
         await self.page.goto("https://cip.test/")
@@ -147,6 +149,9 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         elif path == "/saveInReservationWait.do":
             await route.fulfill(content_type="application/json", body=json.dumps(self.wait_data))
         elif path == "/selectInreservationListNew.do":
+            if self.query_abort:
+                await route.abort('connectionrefused')
+                return
             await asyncio.sleep(self.query_delays.pop(0) if self.query_delays else 0)
             options = dict(status=self.query_statuses.pop(0) if self.query_statuses else 200,
                            content_type="application/json", body=json.dumps(self.list_data))
@@ -591,7 +596,20 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_warehouse_row_reports_missing_checkbox(self):
         await self.page.locator('#list tr').evaluate('el => el.remove()')
-        await self.assert_stops_before_save('대상 시간대 체크박스가 없습니다')
+        await self.assert_stops_before_save('청북2층 일반품목 예약 행이 없습니다')
+
+    async def test_small_product_row_is_ignored_for_slot_selection(self):
+        await self.page.evaluate("""() => {
+            const general = document.querySelector('#list tr[id="1"]');
+            const small = general.cloneNode(true);
+            small.id = '2';
+            small.querySelector('[aria-describedby="list_comptype"]').textContent = '소품목';
+            document.querySelector('#list').append(small);
+        }""")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        self.assertTrue(await self.page.locator('#list tr[id="1"] input[type="checkbox"]').is_checked())
+        self.assertFalse(await self.page.locator('#list tr[id="2"] input[type="checkbox"]').is_checked())
 
     async def test_wrong_warehouse_stops_before_save(self):
         await self.page.locator('#ly_popInreservationMain_srchFacgubn').evaluate("el=>el.value='2'")
@@ -618,11 +636,26 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.page.locator('#list input').is_enabled())
         self.assertEqual(await self.page.locator('#openMain').count(), 0)
 
-    async def test_slow_query_over_old_six_second_limit_is_not_reissued(self):
-        self.automation.site_timeout_ms = 10000
-        self.query_delays = [6.5]
+    async def test_slow_query_beyond_site_timeout_is_not_reissued(self):
+        self.automation.site_timeout_ms = 150
+        self.query_delays = [.4]
         data = await self.automation.refresh_reservation_list(self.page, 13)
         self.assertEqual(data, self.list_data)
+        self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 1)
+
+    async def test_visible_loading_indicator_waits_past_site_timeout(self):
+        self.automation.site_timeout_ms = 100
+        await self.page.evaluate("""() => {
+            document.getElementById('btnSelect').onclick = async () => {
+                const loading = document.getElementById('load_list');
+                loading.style.display = 'block';
+                await fetch('/selectInreservationListNew.do', {method:'POST'});
+                setTimeout(() => { loading.style.display = 'none'; }, 350);
+            };
+        }""")
+        started = asyncio.get_running_loop().time()
+        await self.automation.refresh_reservation_list(self.page, 13)
+        self.assertGreaterEqual(asyncio.get_running_loop().time() - started, .3)
         self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 1)
 
     async def test_list_retry_honors_retry_after_header(self):
@@ -633,11 +666,11 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Retry-After 0', '\n'.join(logs.output))
         self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 2)
 
-    async def test_list_retry_uses_short_delay_for_gateway_errors(self):
+    async def test_list_gateway_retry_is_staggered_by_hour(self):
         self.query_statuses = [503, 200]
-        with patch('src.browser.retry_delay', return_value=0) as delay:
+        with patch('src.browser.asyncio.sleep', AsyncMock()) as sleep:
             await self.automation.refresh_reservation_list(self.page, 13)
-        delay.assert_called_once_with(0, .5, 1)
+        sleep.assert_any_await(2)
 
     async def test_list_refresh_records_response_and_render_timing(self):
         with self.assertLogs('popup-test', level='INFO') as logs:
@@ -646,6 +679,15 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('[TIMING] 예약 목록 AJAX 시작', timing)
         self.assertIn('[TIMING] 예약 목록 응답 수신', timing)
         self.assertIn('[TIMING] 체크박스 화면 반영', timing)
+        self.assertIn('[NETWORK] 요청 POST /selectInreservationListNew.do (headful)', timing)
+        self.assertIn('[NETWORK] 응답 HTTP 200 /selectInreservationListNew.do', timing)
+
+    async def test_failed_list_request_records_reason_and_stops_waiting(self):
+        self.query_abort = True
+        with self.assertLogs('popup-test', level='ERROR') as logs, \
+             self.assertRaisesRegex(RuntimeError, '예약 목록 조회 요청 실패'):
+            await self.automation.refresh_reservation_list(self.page, 13)
+        self.assertIn('[NETWORK] 요청 실패 POST /selectInreservationListNew.do', '\n'.join(logs.output))
 
     async def test_delayed_material_grid_requeries_once_in_current_tab(self):
         self.automation.site_timeout_ms = 300
@@ -661,20 +703,12 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'CONFIRMED')
         self.assertEqual(self.requests.count('/selectMMIF0015List.do'), 1)
 
-    async def test_read_only_query_retries_temporary_overload_and_timeout(self):
-        for failure in ('overload', 'timeout'):
-            with self.subTest(failure=failure):
-                self.requests.clear()
-                if failure == 'overload':
-                    self.automation.site_timeout_ms = 1000
-                    self.query_statuses = [503, 200]
-                else:
-                    self.automation.site_timeout_ms = 150
-                    self.query_delays = [0.4, 0]
-                with self.assertLogs('popup-test', level='WARNING') as logs:
-                    await self.automation.refresh_reservation_list(self.page, 13)
-                self.assertIn('[RETRY]', '\n'.join(logs.output))
-                self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 2)
+    async def test_read_only_query_retries_temporary_overload(self):
+        self.query_statuses = [503, 200]
+        with self.assertLogs('popup-test', level='WARNING') as logs:
+            await self.automation.refresh_reservation_list(self.page, 13)
+        self.assertIn('[RETRY]', '\n'.join(logs.output))
+        self.assertEqual(self.requests.count('/selectInreservationListNew.do'), 2)
 
     async def test_slow_save_over_old_twelve_second_limit_waits_without_resubmission(self):
         self.automation.save_timeout_seconds = 20
