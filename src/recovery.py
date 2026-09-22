@@ -1,9 +1,6 @@
 """혼잡 시 예약 저장 결과를 확인하고 제한적으로 재시도한다."""
 import asyncio
 import random
-import re
-from collections import Counter
-from html import unescape
 from urllib.parse import urlsplit
 
 
@@ -21,23 +18,6 @@ class RecoveredReservation(Exception):
 def retry_delay(attempt, base=2.0, maximum=15.0):
     ceiling = min(maximum, base * 2 ** min(attempt, 20))
     return random.uniform(ceiling * .75, ceiling)
-
-
-def materials_match(expected, actual):
-    if not expected or not actual or len(expected) != len(actual):
-        return False
-    fields = set(expected[0])
-    if not fields or any(set(row) != fields for row in expected):
-        return False
-    if any(not isinstance(row, dict) or not fields.issubset(row) for row in actual):
-        return False
-    stable = {field for field in fields if any(
-        token in field.lower() for token in ("code", "item", "matnr", "seq", "_id", "cd"))}
-    fields = stable or fields
-    clean = lambda value: " ".join(unescape(re.sub(r"<[^>]*>", "", str(value or ""))).split())
-    normalize = lambda rows: Counter(
-        tuple((key, clean(row[key])) for key in sorted(fields)) for row in rows)
-    return normalize(expected) == normalize(actual)
 
 
 class ReservationRecoveryMixin:
@@ -59,13 +39,8 @@ class ReservationRecoveryMixin:
         })""")
 
     async def inspect_saved_reservation(self, source_page, hour, day, intent, verification_page=None):
-        if not intent or not intent.get("owner") or not intent.get("materials") or not all(intent["materials"]):
-            raise RuntimeError("저장 결과 비교 자료가 없습니다.")
-        items_url = intent.get("items_url", "")
-        source, target = urlsplit(source_page.url), urlsplit(items_url)
-        if ((source.scheme, source.netloc) != (target.scheme, target.netloc)
-                or not target.path.endswith("/selectInReservationItemListNew.do")):
-            raise RuntimeError("저장 품목 조회 주소가 올바르지 않습니다.")
+        if not intent or not intent.get("owner"):
+            raise RuntimeError("저장 결과 확인용 업체 번호가 없습니다.")
         page = verification_page or await source_page.context.new_page()
         try:
             reservation_path = urlsplit(self.config.get("reservation_url", "")).path
@@ -76,7 +51,6 @@ class ReservationRecoveryMixin:
                 await date_field.fill(day)
                 await date_field.press("Tab")
             col = str({8:1, 9:2, 10:3, 11:4, 13:5, 14:6, 15:7}[hour])
-            found = False
             for tab, status in (("atab1", "CONFIRMED"), ("atab2", "WAIT")):
                 if await page.locator(".tabWrap ul li.active a").get_attribute("id") != tab:
                     await page.locator(f"#{tab}").click(timeout=self.site_timeout_ms)
@@ -89,17 +63,16 @@ class ReservationRecoveryMixin:
                            and row.get("comptype") in ("C2", "일반품목")
                            and str(row.get("colink" + col, "")) == intent["owner"]
                            and str(row.get("seq" + col, "")).strip() not in ("", "0", "None")]
-                if len(matches) > 1:
-                    raise RuntimeError("동일 시간대·업체 예약이 여러 건입니다.")
                 if not matches:
                     continue
-                found = True
                 seq = str(matches[0]["seq" + col])
-                response = await page.request.post(items_url, form={"srchSeq": seq}, timeout=self.site_timeout_ms)
-                detail = await self.read_json_response(response, "저장 품목 재조회")
-                if isinstance(detail.get("rows"), list) and materials_match(intent["materials"], detail["rows"]):
-                    return dict(hour=hour, day=day, status=status, detail=f"예약번호 {seq} / 재조회 확인")
-            return None if found else dict(hour=hour, day=day, status="ABSENT")
+                if len(matches) > 1:
+                    self.logger.warning(
+                        f"[{hour}시 탭] 동일 시간대·업체 예약 {len(matches)}건 확인: 예약번호 {seq}를 성공 기준으로 사용")
+                recovered_status = "EXISTING_CONFIRMED" if status == "CONFIRMED" else "WAIT"
+                return dict(hour=hour, day=day, status=recovered_status,
+                            detail=f"예약번호 {seq} / 서버 예약 확인 (다른 PC 실행 포함)")
+            return dict(hour=hour, day=day, status="ABSENT")
         finally:
             if verification_page is None:
                 self.dialog_pages.discard(page)
@@ -117,7 +90,7 @@ class ReservationRecoveryMixin:
                 try:
                     result = await self.inspect_saved_reservation(
                         page, hour, day, intent, verification_page)
-                    if result and result["status"] in ("CONFIRMED", "WAIT"):
+                    if result and result["status"] in ("CONFIRMED", "EXISTING_CONFIRMED", "WAIT"):
                         return result
                     absent = absent + 1 if result and result["status"] == "ABSENT" else 0
                     if absent == self.config.get("save_retry_absence_checks", 2):
@@ -150,8 +123,8 @@ class ReservationRecoveryMixin:
 
     async def recover_unknown(self, page, hour, day, key, result):
         intent = self.state.get_intent(key)
-        if not intent or not intent.get("owner") or not intent.get("materials") or not all(intent["materials"]):
-            result["detail"] += " / 비교 자료 없음: 자동 재저장 보류"
+        if not intent or not intent.get("owner"):
+            result["detail"] += " / 업체 번호 없음: 자동 재저장 보류"
             return result
         deadline = asyncio.get_running_loop().time() + self.config.get("recovery_timeout_seconds", 600)
         not_before = asyncio.get_running_loop().time() + self.config.get("save_retry_grace_seconds", 5)
@@ -170,7 +143,7 @@ class ReservationRecoveryMixin:
                 try:
                     checked = await self.inspect_saved_reservation(
                         page, hour, day, intent, verification_page)
-                    if checked and checked["status"] in ("CONFIRMED", "WAIT"):
+                    if checked and checked["status"] in ("CONFIRMED", "EXISTING_CONFIRMED", "WAIT"):
                         return checked
                     absent = absent + 1 if checked and checked["status"] == "ABSENT" else 0
                     if ((intent.get("retryable_save") or intent.get("retryable_http"))

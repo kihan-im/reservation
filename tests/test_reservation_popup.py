@@ -130,7 +130,9 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         await self.page.route("**/*", self.route)
         await self.page.goto("https://cip.test/")
         self.automation = CosmaxAutomation(
-            {"log_dir": self.tmp.name, 'site_timeout_seconds': 1, 'save_timeout_seconds': 1},
+            {"log_dir": self.tmp.name, 'site_timeout_seconds': 1, 'save_timeout_seconds': 1,
+             'recovery_timeout_seconds': .01, 'retry_base_seconds': .001,
+             'retry_max_seconds': .001, 'save_retry_grace_seconds': .001},
             logging.getLogger("popup-test")
         )
 
@@ -386,18 +388,29 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
 
-    async def test_unknown_existing_mismatch_is_not_blindly_resubmitted(self):
+    async def test_unknown_result_accepts_other_pc_server_reservation_without_resubmitting(self):
         self.list_data['rows'][0]['colink5'] = 'another-vendor'
+        self.automation.config.update(recovery_timeout_seconds=.01,
+                                      retry_base_seconds=.001, retry_max_seconds=.001)
         result = await self.automation.reserve_single_slot(self.page, 13)
         self.assertEqual(result['status'], 'UNKNOWN')
         before = self.requests.count('/saveInReservationItemListNew.do')
-        self.automation.config.update(recovery_timeout_seconds=.01,
-                                      retry_base_seconds=.001, retry_max_seconds=.001)
-        self.list_data['rows'][0]['colink5'] = '102190'
-        await self.page.reload()
-        again = await self.automation.reserve_single_slot(self.page, 13)
-        self.assertEqual(again['status'], 'UNKNOWN')
+        confirmed = {'hour':13, 'day':'20990101', 'status':'EXISTING_CONFIRMED',
+                     'detail':'예약번호 12345 / 서버 예약 확인 (다른 PC 실행 포함)'}
+        with patch.object(self.automation, 'inspect_saved_reservation', AsyncMock(return_value=confirmed)):
+            await self.page.reload()
+            again = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(again['status'], 'EXISTING_CONFIRMED')
         self.assertEqual(before, self.requests.count('/saveInReservationItemListNew.do'))
+
+    async def test_terminal_save_rejection_accepts_other_pc_server_reservation(self):
+        self.save_data = {'returnCode':'FAIL', 'returnMessage':'이미 처리되어 예약 불가'}
+        confirmed = {'hour':13, 'day':'20990101', 'status':'EXISTING_CONFIRMED',
+                     'detail':'예약번호 12345 / 서버 예약 확인 (다른 PC 실행 포함)'}
+        with patch.object(self.automation, 'inspect_saved_reservation', AsyncMock(return_value=confirmed)) as inspect:
+            result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result, confirmed)
+        inspect.assert_awaited_once()
 
     async def test_non_http_unknown_retries_without_recovery_delay(self):
         key = self.automation.state.key('', '20990101', 13)

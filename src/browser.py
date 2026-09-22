@@ -918,6 +918,15 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                 detail = str(data.get('returnMessage') or f'알 수 없는 저장 응답: {code}')
                 terminal = code in ('FAIL', 'NOSES') and any(
                     word in detail for word in ('마감', '한도', '초과', '미달', '권한', '불가'))
+                if terminal:
+                    try:
+                        shared_result = await self.inspect_saved_reservation(page, hour, day, intent)
+                        if shared_result['status'] in ('CONFIRMED', 'EXISTING_CONFIRMED', 'WAIT'):
+                            self.logger.info(
+                                f"[{tab_label}] 다른 PC를 포함한 서버 예약 확인: {shared_result['detail']}")
+                            return shared_result
+                    except Exception as check_error:
+                        self.logger.warning(f"[{tab_label}] 저장 거절 후 서버 예약 확인 실패: {check_error}")
                 result.update(status='FAILED' if terminal else 'UNKNOWN', detail=detail)
                 if terminal:
                     result['retryable'] = False
@@ -967,8 +976,11 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                        and r.get('comptype') in ('C2', '일반품목')
                        and str(r.get('colink' + col_arg, '')) == owner and owner
                        and str(r.get('seq' + col_arg, '')).strip() not in ('', '0', 'None')]
-            if len(matches) != 1 or await page.locator('#srchReservDay').input_value() != day:
+            if not matches or await page.locator('#srchReservDay').input_value() != day:
                 raise RuntimeError('저장 후 예약 목록에서 동일 날짜·창고·시간·업체의 예약번호를 확인하지 못했습니다.')
+            if len(matches) > 1:
+                self.logger.warning(
+                    f"[{tab_label}] 저장 후 동일 시간대·업체 예약 {len(matches)}건 확인: 첫 예약번호를 성공 기준으로 사용")
             result.update(status=status, detail=f"예약번호 {matches[0]['seq' + col_arg]}")
             self.logger.info(f"[{tab_label}] [{status}] {day} {hour}시 {result['detail']}")
             return result
