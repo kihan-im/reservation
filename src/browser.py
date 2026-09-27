@@ -530,7 +530,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
             raise
         await self.check_site_notice(page, hour, step)
 
-    async def add_self_materials(self, page, hour: int):
+    async def add_self_materials(self, page, hour: int, existing_materials_task=None):
         """자급자재 창 열기부터 조회·선택·메인 창 추가까지 완료 상태를 확인한다."""
         def log_failed_request(request):
             if request.resource_type in ("xhr", "fetch"):
@@ -548,18 +548,11 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         page.on("response", log_error_response)
         step = "자급자재 창 열기"
         try:
-            main_count_before = await self.read_material_count(page, hour)
-            limit = await self.validate_material_limit(page, hour, main_count_before)
-            remaining = limit - main_count_before
-            if remaining == 0:
-                self.logger.info(f"[{hour}시 탭] 품목 수 한도 도달: 기존 {main_count_before}개 / 허용 {limit}개. 추가·저장 생략")
-                return 0
             await self.click_reservation_button(
                 page, hour, "#ly_popInreservationMain_btnSelfAdd", step
             )
             await page.locator("#ly_popInreservationSelf").wait_for(state="visible", timeout=self.site_timeout_ms)
             await self.check_site_notice(page, hour, step)
-            await self.save_stage_screenshot(page, hour, 3, "self_material_modal_opened")
 
             step = "자급자재 조회"
             # 진행 중인 조회는 기다리고, 실패한 경우만 현재 모달에서 한 번 다시 조회한다.
@@ -570,6 +563,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                         '/selectMMIF0015List.do',
                         attempts=1,
                     )
+                    await self.save_stage_screenshot(page, hour, 3, "self_material_modal_opened")
                     self.logger.info(f"[{hour}시 탭] 자급자재 조회 응답: HTTP {response.status}")
                     if not response.ok:
                         raise ResponseError(f"[{hour}시 탭] 자급자재 조회", response)
@@ -612,6 +606,14 @@ class CosmaxAutomation(ReservationRecoveryMixin):
             await self.save_stage_screenshot(page, hour, 4, "self_materials_loaded")
 
             step = "자급자재 품목 선택"
+            existing_count = await existing_materials_task if existing_materials_task else None
+            main_count_before = (existing_count if existing_count is not None
+                                 else await self.read_material_count(page, hour))
+            limit = await self.validate_material_limit(page, hour, main_count_before)
+            remaining = limit - main_count_before
+            if remaining == 0:
+                self.logger.info(f"[{hour}시 탭] 품목 수 한도 도달: 기존 {main_count_before}개 / 허용 {limit}개. 추가·저장 생략")
+                return 0
             table = page.locator("#ly_popInreservationSelf_itemList")
             checked_count = await table.locator('input[type="checkbox"]:checked').count()
             eligible = table.locator(
@@ -679,22 +681,24 @@ class CosmaxAutomation(ReservationRecoveryMixin):
     async def read_material_count(self, page, hour):
         """목록 행 수와 종목 수는 다를 수 있으므로 사이트 표시값을 읽는다."""
         try:
-            await page.wait_for_function("""() => {
-                const input = document.querySelector('#ly_popInreservationMain_itemcntTotal');
-                return input && /^[0-9]+$/.test(input.value.trim());
-            }""", timeout=self.site_timeout_ms)
-            return int(await page.locator('#ly_popInreservationMain_itemcntTotal').input_value())
+            value = (await page.locator(
+                '#ly_popInreservationMain_itemcntTotal'
+            ).input_value(timeout=self.site_timeout_ms)).strip()
+            if not value.isascii() or not value.isdigit():
+                raise ValueError(value)
+            return int(value)
         except Exception as error:
             raise RuntimeError(f"[{hour}시 탭] 현재 종목 수를 확인하지 못했습니다. 저장 생략") from error
 
     async def validate_material_limit(self, page, hour, count):
         """사이트가 조회한 시간대별 한도로 검사한다. 한도를 추측하지 않는다."""
         try:
-            await page.wait_for_function("""() => {
-                const input = document.querySelector('#ly_popInreservationMain_itemcntLimit');
-                return input && /^[0-9]+$/.test(input.value.trim()) && Number(input.value) > 0;
-            }""", timeout=self.site_timeout_ms)
-            limit = int(await page.locator('#ly_popInreservationMain_itemcntLimit').input_value())
+            value = (await page.locator(
+                '#ly_popInreservationMain_itemcntLimit'
+            ).input_value(timeout=self.site_timeout_ms)).strip()
+            if not value.isascii() or not value.isdigit() or int(value) <= 0:
+                raise ValueError(value)
+            limit = int(value)
         except Exception as error:
             raise RuntimeError(f"[{hour}시 탭] 품목 수 허용 한도를 확인하지 못했습니다. 저장 생략") from error
         if count > limit:
@@ -723,13 +727,13 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         data = await self.read_json_response(response, '기존 예약 품목 조회')
         if data.get('returnCode') in ('FAIL', 'NOSES') or not isinstance(data.get('rows'), list):
             raise RuntimeError(f"[{hour}시 탭] 기존 예약 품목 조회 실패: {data.get('returnMessage', '')}")
-        await page.wait_for_function("""(count) => {
-            const loading = document.querySelector('#load_ly_popInreservationMain_itemList');
-            return (!loading || !loading.getClientRects().length)
-                && document.querySelectorAll('#ly_popInreservationMain_itemList tr[id]').length === count;
-        }""", arg=len(data['rows']), timeout=self.site_timeout_ms)
+        count = data.get('itemCount', len(data['rows']))
+        count_text = str(count).strip()
+        if isinstance(count, bool) or not count_text.isascii() or not count_text.isdigit():
+            raise RuntimeError(f"[{hour}시 탭] 기존 예약 품목 수를 확인하지 못했습니다. 저장 생략")
         await self.check_site_notice(page, hour, '기존 예약 품목 조회')
-        self.logger.info(f"[{hour}시 탭] 기존 예약번호 {seq}: 자재 목록 {len(data['rows'])}행 조회 완료, 화면 종목 수로 추가 가능 여부 확인")
+        self.logger.info(f"[{hour}시 탭] 기존 예약번호 {seq}: 자재 목록 {len(data['rows'])}행 / 현재 종목 {count_text}개 조회 완료")
+        return int(count_text)
 
     async def reserve_single_slot(self, page, hour: int):
         tab_label = f"{hour}시 탭"
@@ -821,12 +825,25 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         await self.check_site_notice(page, hour, '예약 창 열기')
         await page.locator('#ly_popInreservationMain').wait_for(state='visible', timeout=self.site_timeout_ms)
         await self.validate_reservation_form(page, hour, day, col_arg)
+        existing_materials_task = None
         if existing_reservation:
-            await self.load_existing_materials(page, hour, seq)
-        await self.save_stage_screenshot(page, hour, 2, "main_modal_opened")
-
+            existing_materials_task = asyncio.create_task(
+                self.load_existing_materials(page, hour, seq)
+            )
+            request_path = '/selectInReservationItemListNew.do'
+            while (not existing_materials_task.done()
+                   and request_path not in self.network_state.get(page, {})):
+                await asyncio.sleep(0)
+            if existing_materials_task.done():
+                await existing_materials_task
         # 3~6. 실제 팝업 표시와 조회 완료를 확인하며 자급자재를 추가한다.
-        added_count = await self.add_self_materials(page, hour)
+        try:
+            await self.save_stage_screenshot(page, hour, 2, "main_modal_opened")
+            added_count = await self.add_self_materials(page, hour, existing_materials_task)
+        finally:
+            if existing_materials_task and not existing_materials_task.done():
+                existing_materials_task.cancel()
+                await asyncio.gather(existing_materials_task, return_exceptions=True)
         if added_count == 0:
             status = 'EXISTING_CONFIRMED' if existing_reservation else 'NO_CHANGE'
             detail = (f'기존 예약번호 {seq} / 품목 수가 목표 또는 허용 한도에 도달'

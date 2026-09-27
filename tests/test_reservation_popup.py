@@ -18,7 +18,7 @@ from src.logger import setup_logger, flush_logger_to_disk, generate_html_log
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
 #lyNoti { display:none; position:fixed; inset:20px; z-index:90; background:white; }
 #ly_popInreservationSelf { display:none; position:absolute; inset:20px; z-index:80; background:white; }
-#load_list, #load_ly_popInreservationSelf_itemList {display:none}
+#load_list, #load_ly_popInreservationMain_itemList, #load_ly_popInreservationSelf_itemList {display:none}
 </style></head><body>
 <div class="tabWrap"><ul><li class="active"><a id="atab1">예약목록</a></li></ul></div>
 <input id="srchReservDay" value="20990101">
@@ -34,6 +34,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
 <input id="ly_popInreservationMain_srchComptype" value="C2">
 <button id="ly_popInreservationMain_btnSelfAdd">자급자재 추가</button>
 <button id="ly_popInreservationMain_btnSelect">기존 품목 조회</button>
+<div id="load_ly_popInreservationMain_itemList">조회중...</div>
 <table id="ly_popInreservationMain_itemList"></table>
 <input id="ly_popInreservationMain_itemcntLimit" value="8">
 <input id="ly_popInreservationMain_itemcntTotal" value="0">
@@ -121,6 +122,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.wait_data = {"returnCode":"SUCCESS"}
         self.list_data = {"rows":[{"facgubn":"1", "comptype":"C2", "colink5":"102190", "seq5":"12345"}]}
         self.existing_data = {"rows":[{}, {}, {}]}
+        self.existing_delay = 0
         self.requests = []
         self.query_statuses = []
         self.query_headers = []
@@ -161,6 +163,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
                 options['headers'] = self.query_headers.pop(0)
             await route.fulfill(**options)
         elif path == "/selectInReservationItemListNew.do":
+            await asyncio.sleep(self.existing_delay)
             await route.fulfill(content_type="application/json", body=json.dumps(self.existing_data))
         else:
             await route.abort()
@@ -258,6 +261,38 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr').count(), 3)
         self.assertFalse(await self.page.locator('#lyNoti').is_visible())
         self.assertTrue(list(Path(self.tmp.name).rglob('*04_self_materials_loaded.png')))
+
+    async def test_main_loading_indicator_does_not_block_self_query_or_next_step(self):
+        await self.page.evaluate("""() => {
+            const loading = document.getElementById('load_ly_popInreservationMain_itemList');
+            loading.style.display = 'block';
+            const button = document.getElementById('ly_popInreservationSelf_btnSelect');
+            const query = button.onclick;
+            button.onclick = event => {
+                window.selfQueryStartedWhileMainLoading = Boolean(loading.getClientRects().length);
+                query(event);
+            };
+        }""")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        self.assertTrue(await self.page.evaluate('window.selfQueryStartedWhileMainLoading'))
+        self.assertTrue(await self.page.locator('#load_ly_popInreservationMain_itemList').is_visible())
+
+    async def test_existing_items_load_does_not_delay_self_material_query(self):
+        await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
+        self.existing_delay = .5
+        await self.page.evaluate("""() => {
+            const button = document.getElementById('ly_popInreservationSelf_btnSelect');
+            const query = button.onclick;
+            button.onclick = event => {
+                window.selfQueryStartedBeforeExistingItems =
+                    document.querySelectorAll('#ly_popInreservationMain_itemList tr[id]').length === 0;
+                query(event);
+            };
+        }""")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        self.assertTrue(await self.page.evaluate('window.selfQueryStartedBeforeExistingItems'))
 
     async def test_screenshots_do_not_trigger_site_resize_and_cover_self_modal(self):
         # 실제 사이트처럼 화면보다 문서가 길고 resize 때 첫 번째 팝업이 앞으로 올라온다.
@@ -515,13 +550,13 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         await self.assert_stops_before_save('조회된 자급자재가 없습니다')
         self.assertEqual(self.automation.state.get(key), {'status':'WAIT', 'detail':'기존 대기 예약'})
 
-    async def test_existing_items_query_failure_stops_before_add(self):
+    async def test_existing_items_query_failure_stops_after_self_query_before_add(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
         self.existing_data = {'returnCode':'FAIL', 'returnMessage':'기존 품목 조회 거절'}
         await self.assert_stops_before_save('기존 품목 조회 거절')
-        self.assertNotIn('/selectMMIF0015List.do', self.requests)
+        self.assertIn('/selectMMIF0015List.do', self.requests)
 
-    async def test_eight_existing_items_skip_add_and_save(self):
+    async def test_eight_existing_items_query_then_skip_add_and_save(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
         self.existing_data = {'rows':[{}] * 8}
         # 조회 기간에 포함된 기존 품목은 하나뿐이어도 메인에는 기존 8개가 남아 있다.
@@ -530,7 +565,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'EXISTING_CONFIRMED')
         self.assertNotIn('/saveInReservationItemListNew.do', self.requests)
         self.assertEqual(await self.page.locator('#ly_popInreservationMain_itemList tr[id^="existing"]').count(), 8)
-        self.assertNotIn('/selectMMIF0015List.do', self.requests)
+        self.assertIn('/selectMMIF0015List.do', self.requests)
 
     async def test_nine_rows_with_eight_displayed_items_skip_without_false_limit_error(self):
         await self.page.locator('[aria-describedby="list_seq5"]').evaluate("el=>el.textContent='12345'")
@@ -594,7 +629,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
     async def test_missing_limit_stops_without_guessing_or_saving(self):
         await self.page.locator('#ly_popInreservationMain_itemcntLimit').evaluate('el => el.remove()')
         await self.assert_stops_before_save('품목 수 허용 한도를 확인하지 못했습니다')
-        self.assertNotIn('/selectMMIF0015List.do', self.requests)
+        self.assertIn('/selectMMIF0015List.do', self.requests)
 
     async def test_alert_after_save_request_keeps_unknown_with_original_reason(self):
         message = '13:00 시간의 품목 수 제한을 초과 했습니다.'
