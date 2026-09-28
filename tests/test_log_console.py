@@ -28,7 +28,8 @@ class LogConsoleTest(unittest.TestCase):
                 title.assert_called_once_with(13)
                 for call, hour in zip(spawn.call_args_list, [14, 15]):
                     self.assertEqual(call.args[0][2:6],
-                                     ['-m', 'src.log_console', str(hour), logger.tab_log_paths[hour]])
+                                     ['-m', 'src.log_console', str(hour), logger.log_path])
+                    self.assertEqual(call.args[0][-1], str(logger.log_start_offset))
                     self.assertEqual(call.kwargs['creationflags'], 0x10)
                 logger.info('common context')
                 for hour in [13, 14, 15]:
@@ -38,11 +39,10 @@ class LogConsoleTest(unittest.TestCase):
             self.assertIn('unique-13', output.getvalue())
             self.assertNotIn('unique-14', output.getvalue())
             self.assertNotIn('unique-15', output.getvalue())
-            for hour, path in logger.tab_log_paths.items():
-                text = Path(path).read_text(encoding='utf-8')
-                self.assertIn('common context', text)
-                for other in [13, 14, 15]:
-                    self.assertEqual(f'unique-{other}' in text, hour == other)
+            text = Path(logger.log_path).read_text(encoding='utf-8')
+            self.assertIn('common context', text)
+            for hour in [13, 14, 15]:
+                self.assertIn(f'unique-{hour}', text)
 
     def test_spawn_failure_keeps_all_logs_in_original_console(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -78,6 +78,23 @@ class LogConsoleTest(unittest.TestCase):
             with patch('src.log_console.time.sleep'):
                 follow_log(path, output, running)
             self.assertEqual(output.getvalue(), '한글\n[COMPLETE]\n')
+
+    def test_follow_filters_daily_log_without_losing_traceback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'automation.log'
+            path.write_text(
+                'old run\n'
+                '2026-09-28 10:00:00,000 [INFO] [RUN one] [13시 탭] thirteen\n'
+                '  thirteen traceback\n'
+                '2026-09-28 10:00:01,000 [INFO] [RUN one] [14시 탭] fourteen\n'
+                '  fourteen traceback\n'
+                '2026-09-28 10:00:02,000 [INFO] [RUN one] common\n', encoding='utf-8')
+            output = io.StringIO()
+            follow_log(path, output, lambda: False, hour=14, start_offset=len('old run\n'))
+            self.assertIn('fourteen traceback', output.getvalue())
+            self.assertIn('common', output.getvalue())
+            self.assertNotIn('thirteen', output.getvalue())
+            self.assertNotIn('old run', output.getvalue())
 
     def test_headless_windows_default_and_explicit_overrides_run_automation_once(self):
         import main as entry

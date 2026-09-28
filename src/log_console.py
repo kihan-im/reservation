@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -16,17 +17,17 @@ def set_console_title(hour):
 
 
 def start_tab_consoles(logger):
-    """기존 콘솔은 첫 시간대, 나머지는 해당 실행의 로그 파일만 읽는다."""
+    """기존 콘솔은 첫 시간대, 나머지는 통합 로그에서 해당 탭만 읽는다."""
     if sys.platform != 'win32':
         logger.warning('시간대별 콘솔은 Windows에서만 지원합니다. 현재 콘솔에서 계속 실행합니다.')
         return
-    hours = list(logger.tab_log_paths)
+    hours = logger.target_hours
     readers = []
     try:
         for hour in hours[1:]:
             readers.append(subprocess.Popen(
                 [sys.executable, '-u', '-m', 'src.log_console', str(hour),
-                 logger.tab_log_paths[hour], str(os.getpid())],
+                 logger.log_path, str(os.getpid()), str(logger.log_start_offset)],
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 creationflags=0x00000010,  # CREATE_NEW_CONSOLE
             ))
@@ -43,13 +44,26 @@ def start_tab_consoles(logger):
     logger.info(f'[CONSOLES] 시간대 {hours} 로그 분리. 로그인과 예약 프로세스는 1개입니다.')
 
 
-def follow_log(path, output, parent_running):
+def follow_log(path, output, parent_running, hour=None, start_offset=0):
     """실행 종료 시 마지막 기록까지 출력한다. 쓰기 도중의 UTF-8 문자도 보존한다."""
     decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    pending = ''
+    visible = True
     with open(path, 'rb') as source:
+        source.seek(start_offset)
         while True:
             running = parent_running()
-            output.write(decoder.decode(source.read(), final=not running))
+            pending += decoder.decode(source.read(), final=not running)
+            lines = pending.splitlines(keepends=True)
+            pending = ''
+            if running and lines and not lines[-1].endswith(('\n', '\r')):
+                pending = lines.pop()
+            for line in lines:
+                if hour is not None and re.match(r'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} \[', line):
+                    marker = re.search(r'\[(\d+)시 탭\]', line)
+                    visible = marker is None or marker.group(1) == str(hour)
+                if visible:
+                    output.write(line)
             output.flush()
             if not running:
                 return
@@ -57,7 +71,7 @@ def follow_log(path, output, parent_running):
 
 
 def main():
-    hour, path, parent_pid = sys.argv[1:]
+    hour, path, parent_pid, *offset = sys.argv[1:]
     sys.stdout.reconfigure(encoding='utf-8', errors='replace', newline='')
     disable_windows_quick_edit()
     set_console_title(hour)
@@ -71,7 +85,9 @@ def main():
     kernel32.CloseHandle.restype = wintypes.BOOL
     handle = kernel32.OpenProcess(0x00100000, False, int(parent_pid))  # SYNCHRONIZE
     try:
-        follow_log(path, sys.stdout, lambda: bool(handle) and kernel32.WaitForSingleObject(handle, 0) == 258)
+        follow_log(path, sys.stdout,
+                   lambda: bool(handle) and kernel32.WaitForSingleObject(handle, 0) == 258,
+                   hour, int(offset[0]) if offset else 0)
     finally:
         if handle:
             kernel32.CloseHandle(handle)

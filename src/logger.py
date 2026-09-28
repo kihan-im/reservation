@@ -49,7 +49,7 @@ def disable_windows_quick_edit():
 
 
 def setup_logger(log_dir="log", target_hours=None, clean_existing=False) -> logging.Logger:
-    """날짜·시간대 폴더에 실행별 파일 로그를 지속 기록한다. 기존 기록은 삭제하지 않는다."""
+    """하루의 모든 시간대와 실행을 한 파일에 이어 기록한다."""
     disable_windows_quick_edit()
     now = datetime.now()
     run_dir = os.path.abspath(os.path.join(log_dir, now.strftime("%Y%m%d")))
@@ -60,30 +60,28 @@ def setup_logger(log_dir="log", target_hours=None, clean_existing=False) -> logg
     logger.handlers.clear()
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    handlers = [logging.StreamHandler(sys.stdout)]
-    tab_log_paths = {}
-    for hour in dict.fromkeys(target_hours if target_hours is not None else [13, 14, 15]):
-        tab_dir = os.path.join(run_dir, str(hour))
-        os.makedirs(tab_dir, exist_ok=True)
-        tab_log_paths[hour] = os.path.join(tab_dir, f"automation_{run_id}.log")
-        handler = logging.FileHandler(tab_log_paths[hour], encoding="utf-8")
-        handler.addFilter(TabLogFilter(hour))
-        handlers.append(handler)
-    for handler in handlers:
-        handler.setFormatter(formatter)
+    log_path = os.path.join(run_dir, "automation.log")
+    log_start_offset = os.path.getsize(log_path) if os.path.exists(log_path) else 0
+    stream_handler = logging.StreamHandler(sys.stdout)
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    stream_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    file_handler.setFormatter(logging.Formatter(
+        f"%(asctime)s [%(levelname)s] [RUN {run_id}] %(message)s"))
+    handlers = [stream_handler, file_handler]
     log_queue = queue.Queue()
     logger.addHandler(QueueHandler(log_queue))
     logger.queue_listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
     logger.output_handlers = handlers
-    logger.tab_log_paths = tab_log_paths
+    logger.log_path = log_path
+    logger.log_start_offset = log_start_offset
+    logger.report_path = os.path.join(run_dir, "report.html")
+    logger.target_hours = list(dict.fromkeys(target_hours if target_hours is not None else [13, 14, 15]))
     logger.run_dir = run_dir
     logger.run_id = run_id
     logger.queue_listener.start()
     if clean_existing:
         logger.warning("clean_daily_logs는 폐기되었습니다. 실행별 기록을 보존합니다.")
-    for hour, path in tab_log_paths.items():
-        logger.info(f"[{hour}시 탭] 실행 로그: {path}")
+    logger.info(f"통합 실행·네트워크 로그: {log_path}")
     return logger
 
 
@@ -101,7 +99,7 @@ def flush_logger_to_disk(logger: logging.Logger):
 
 def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
     """
-    .log 파일 내용을 파싱하여 반응형 필터링, 실시간 검색, 스크린샷 썸네일 미리보기가 지원되는 HTML 디버깅 보고서 생성
+    날짜별 .log를 실행·시간대별로 찾을 수 있는 HTML 보고서로 만든다.
     """
     if not os.path.exists(log_file_path):
         return ""
@@ -114,6 +112,8 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
 
     parsed_entries = []
     log_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3})\s+\[([A-Z]+)\]\s+(.*)$")
+    run_pattern = re.compile(r"^\[RUN ([^\]]+)\] (.*)$")
+    hour_pattern = re.compile(r"\[(\d+)시 탭\]")
 
     total_count = 0
     info_count = 0
@@ -121,6 +121,7 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
     error_count = 0
     step_count = 0
 
+    current_run, current_hour, current_level = "기존 기록", "공통", "INFO"
     for idx, line in enumerate(lines, 1):
         line_str = line.strip()
         if not line_str:
@@ -129,9 +130,15 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
         match = log_pattern.match(line_str)
         if match:
             timestamp, level, message = match.groups()
+            run_match = run_pattern.match(message)
+            current_run = run_match.group(1) if run_match else "기존 기록"
+            message = run_match.group(2) if run_match else message
+            hour_match = hour_pattern.search(message)
+            current_hour = hour_match.group(1) if hour_match else "공통"
+            current_level = level
         else:
             timestamp = ""
-            level = "INFO"
+            level = current_level
             message = line_str
 
         total_count += 1
@@ -151,7 +158,13 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
         video_path = None
         media_match = re.search(r"(?:[A-Za-z]:[\\/]|/)[^\r\n]*?\.(png|webm)", message)
         if media_match:
-            media_path = media_match.group(0).replace("\\", "/").rsplit("/", 1)[-1]
+            media_name = media_match.group(0).replace("\\", "/").rsplit("/", 1)[-1]
+            media_dir = os.path.dirname(os.path.abspath(log_file_path))
+            if current_hour.isdigit() and os.path.basename(media_dir) != current_hour:
+                media_dir = os.path.join(media_dir, current_hour)
+            media_path = os.path.relpath(
+                os.path.join(media_dir, media_name),
+                os.path.dirname(os.path.abspath(html_file_path))).replace(os.sep, '/')
             if media_match.group(1) == 'webm':
                 video_path = media_path
             else:
@@ -162,12 +175,22 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
             "timestamp": timestamp,
             "level": level,
             "message": message,
+            "hour": current_hour,
+            "run": current_run,
             "is_step": is_step,
             "img_path": img_path,
             "video_path": video_path
         })
 
     today_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    hours = sorted({entry['hour'] for entry in parsed_entries},
+                   key=lambda hour: (hour == '공통', int(hour) if hour.isdigit() else 0))
+    runs = list(dict.fromkeys(entry['run'] for entry in parsed_entries))
+    hour_options = ''.join(
+        f'<option value="{html.escape(hour)}">{html.escape(hour + "시" if hour.isdigit() else hour)}</option>'
+        for hour in hours)
+    run_options = ''.join(
+        f'<option value="{html.escape(run)}">{html.escape(run)}</option>' for run in runs)
 
     html_content = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -305,6 +328,12 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
         .search-box input:focus {{
             border-color: #3b82f6;
         }}
+        .controls select {{
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: white;
+        }}
 
         .log-table-wrapper {{
             background: var(--card-bg);
@@ -436,6 +465,12 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
     </div>
 
     <div class="controls">
+        <select id="hourFilter" aria-label="시간대" onchange="applyFilters()">
+            <option value="ALL">모든 시간대</option>{hour_options}
+        </select>
+        <select id="runFilter" aria-label="실행 시각" onchange="applyFilters()">
+            <option value="ALL">모든 실행</option>{run_options}
+        </select>
         <div class="filter-buttons">
             <button class="btn active" onclick="filterLevel('ALL', this)">전체 ({total_count})</button>
             <button class="btn" onclick="filterLevel('INFO', this)">INFO ({info_count})</button>
@@ -454,6 +489,8 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
                 <tr>
                     <th style="width: 50px;">#</th>
                     <th style="width: 175px;">시각</th>
+                    <th style="width: 70px;">시간대</th>
+                    <th style="width: 175px;">실행</th>
                     <th style="width: 100px;">레벨</th>
                     <th>상세 로그 내용 및 캡처 스크린샷</th>
                 </tr>
@@ -493,9 +530,11 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
             """
 
         html_content += f"""
-                <tr data-level="{entry['level']}" data-step="{str(entry['is_step']).lower()}">
+                <tr data-level="{entry['level']}" data-step="{str(entry['is_step']).lower()}" data-hour="{html.escape(entry['hour'])}" data-run="{html.escape(entry['run'])}">
                     <td>{entry['idx']}</td>
                     <td style="color: #64748b; font-family: monospace;">{entry['timestamp']}</td>
+                    <td>{html.escape(entry['hour'] + '시' if entry['hour'].isdigit() else entry['hour'])}</td>
+                    <td style="font-family: monospace;">{html.escape(entry['run'])}</td>
                     <td><span class="badge {lvl_class}">{entry['level']}</span></td>
                     <td>
                         <div class="{msg_class}">{escaped_msg}</div>
@@ -527,6 +566,8 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
 
     function applyFilters() {
         const query = document.getElementById('searchInput').value.toLowerCase();
+        const hour = document.getElementById('hourFilter').value;
+        const run = document.getElementById('runFilter').value;
         const rows = document.querySelectorAll('#logTable tbody tr');
 
         rows.forEach(row => {
@@ -545,7 +586,8 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
 
             let matchSearch = !query || text.includes(query);
 
-            if (matchLevel && matchSearch) {
+            if (matchLevel && matchSearch && (hour === 'ALL' || row.dataset.hour === hour)
+                    && (run === 'ALL' || row.dataset.run === run)) {
                 row.style.display = '';
             } else {
                 row.style.display = 'none';

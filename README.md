@@ -73,7 +73,7 @@ run_automation.bat --headful --record-video
 
 메뉴 4·5번에서도 녹화하려면 `config.json`에 `"record_video": true`를 설정합니다. **`headless=false`일 때만 녹화하며, `headless=true`에서는 옵션이 켜져 있어도 녹화하지 않습니다.** 메뉴 6번의 자동 실행도 headless이므로 녹화하지 않습니다. `--no-record-video`로 이번 실행만 끌 수 있습니다.
 
-영상은 각 탭을 연 시점부터 브라우저 종료까지(로그인·목표 시각 대기 포함) 무음 WebM으로 기록합니다. 종료 후 `log/날짜/13/video_실행시각_attempt1_13.webm`처럼 시간대별 폴더에 저장하며, 같은 폴더의 HTML에서 재생하거나 내려받을 수 있습니다. [Playwright 영상 녹화](https://playwright.dev/python/docs/videos)를 사용하므로 별도 패키지는 필요하지 않습니다.
+영상은 각 탭을 연 시점부터 브라우저 종료까지(로그인·목표 시각 대기 포함) 무음 WebM으로 기록합니다. 종료 후 `log/날짜/13/video_실행시각_attempt1_13.webm`처럼 시간대별 폴더에 저장하며, 날짜 폴더의 `report.html`에서 재생하거나 내려받을 수 있습니다. [Playwright 영상 녹화](https://playwright.dev/python/docs/videos)를 사용하므로 별도 패키지는 필요하지 않습니다.
 
 영상에는 사이트 화면이 담기며, 브라우저 주소 표시줄·탭·기본 `alert/confirm` 팝업은 포함되지 않습니다. 기본 팝업은 기존 Windows PNG 캡처와 문구 로그로 확인합니다. 사이트 내부 안내창은 영상에 포함됩니다. 브라우저를 정상 종료해야 파일이 완성되며, 강제 종료 시 불완전한 영상이나 임시 이름의 파일이 남을 수 있습니다.
 
@@ -97,25 +97,25 @@ run_automation.bat --headful --record-video
 | `DRY_RUN` | 저장 전까지 점검 완료 |
 | `SKIPPED` | 휴일로 실행 생략 |
 
-종료 코드: **0** 전체 확정·점검 완료·휴일 생략, **1** 실패, **2** 일부 성공 또는 대기/결과 미확인/기존 내역 확인 필요. `0`만으로 실제 예약 실행 여부를 판단하지 말고 각 시간대 로그·HTML의 `[RESULT]`와 `[COMPLETE]`도 확인합니다.
+종료 코드: **0** 전체 확정·점검 완료·휴일 생략, **1** 실패, **2** 일부 성공 또는 대기/결과 미확인/기존 내역 확인 필요. `0`만으로 실제 예약 실행 여부를 판단하지 말고 통합 로그·HTML의 `[RESULT]`와 `[COMPLETE]`도 확인합니다.
 
 ## 기록과 재실행
 
 ```text
 log/
   YYYYMMDD/
+    automation.log                 # 모든 실행·시간대·네트워크 기록
+    report.html                    # 시간대·실행별 필터
     13/
-      automation_YYYYMMDD_HHMMSS_ffffff.log
-      automation_YYYYMMDD_HHMMSS_ffffff.html
-      reservation_YYYYMMDD_HHMMSS_ffffff_attempt1_13_03_....png
+      reservation_YYYYMMDD_HHMMSS_ffffff_attempt1_13_001_03_....png
       video_YYYYMMDD_HHMMSS_ffffff_attempt1_13.webm  # 녹화 시에만 생성
     14/                           # 같은 형식
     15/                           # 같은 형식
 ```
 
-각 시간대 폴더에 로그·HTML·이미지와 선택적으로 녹화한 영상을 저장합니다. 실행 시각과 재시도 번호는 파일명으로 구분하며, 실행별 하위 폴더나 별도 `result.json`은 만들지 않습니다. `[RESULT]`는 해당 시간대 결과, `[COMPLETE]`는 전체 실행 상태와 종료 코드입니다. 공통 로그인·준비 로그는 각 시간대 로그에 함께 들어갑니다.
+날짜별 `automation.log` 한 파일에 모든 실행을 이어 기록합니다. `report.html`에서 시간대와 실행을 선택할 수 있습니다. 13·14·15시 폴더에는 이미지와 선택적으로 녹화한 영상을 저장합니다. 별도 `result.json`은 만들지 않습니다. `[RESULT]`는 해당 시간대 결과, `[COMPLETE]`는 전체 실행 상태와 종료 코드입니다.
 
-로그는 실행 중 파일에 지속 기록하고 종료 시 각 HTML을 만듭니다. HTML과 이미지를 같은 폴더에 보관하면 썸네일을 열 수 있습니다. 사이트 내부 완료 안내는 `*_08_save_notice.png`, Windows 화면 표시 모드의 브라우저 기본 팝업은 `*_browser_dialog_*.png`로 남깁니다. headless 및 Windows 외 환경의 브라우저 기본 팝업은 문구만 기록합니다. 기존 파일은 덮어쓰거나 자동 삭제하지 않습니다.
+로그는 실행 중 파일에 지속 기록하고 종료 시 통합 HTML을 갱신합니다. HTML은 시간대 폴더의 이미지를 상대 경로로 표시합니다. 사이트 내부 완료 안내는 `*_08_save_notice.png`, Windows 화면 표시 모드의 브라우저 기본 팝업은 `*_browser_dialog_*.png`로 남깁니다. headless 및 Windows 외 환경의 브라우저 기본 팝업은 문구만 기록합니다.
 
 실행 기록은 `log/`에 통일합니다. 시간대별 중복 처리는 현재 프로세스의 메모리에서 막고, 재시작 후 실제 예약 여부는 COSMAX 서버의 예약번호와 품목 수를 다시 조회해 판단합니다. 이전 버전의 `.reservation_state` 파일은 더 이상 읽거나 갱신하지 않습니다.
 

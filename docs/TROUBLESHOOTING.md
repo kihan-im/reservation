@@ -2,12 +2,12 @@
 
 ## 먼저 볼 기록
 
-`log/YYYYMMDD/13/`에서 최신 `automation_*.html` 또는 `.log`를 열고 `[RESULT]`, `[FAIL]`, `[UNKNOWN]`, 통신 실패, `[COMPLETE]`를 검색합니다. 14·15시도 같은 방식입니다. 스크린샷은 같은 폴더에 있으며 실행 시각·재시도 번호가 파일명에 들어갑니다. 브라우저 기본 팝업은 Windows 화면 표시 모드에서 `*_browser_dialog_*.png`로 저장합니다. `브라우저 알림/팝업` 로그의 문구도 함께 확인하세요. headless 및 Windows 외 환경에서는 팝업 문구만 기록합니다.
+`log/YYYYMMDD/report.html`에서 시간대와 실행 시각을 선택하고 `[RESULT]`, `[FAIL]`, `[UNKNOWN]`, 통신 실패, `[COMPLETE]`를 검색합니다. 원문은 같은 날짜의 `automation.log`에 있습니다. 스크린샷은 시간대 폴더에 있으며 실행 시각·재시도 번호가 파일명에 들어갑니다. 브라우저 기본 팝업은 Windows 화면 표시 모드에서 `*_browser_dialog_*.png`로 저장합니다. `브라우저 알림/팝업` 로그의 문구도 함께 확인하세요. headless 및 Windows 외 환경에서는 팝업 문구만 기록합니다.
 
 | 증상 | 확인 및 대응 |
 |---|---|
-| 이전 로그 경로나 result.json이 안 보임 | 실행 기록은 log/날짜/시간대에 통일. 상태는 HTML의 [RESULT]·[COMPLETE]와 COSMAX 서버 예약 목록에서 확인 |
-| HTML 이미지가 안 열림 | 해당 실행의 HTML과 PNG를 같은 시간대 폴더에 함께 보관했는지 확인 |
+| 이전 로그 경로나 result.json이 안 보임 | 실행 기록은 log/날짜/automation.log와 report.html에 통일. 상태는 HTML의 [RESULT]·[COMPLETE]와 COSMAX 서버 예약 목록에서 확인 |
+| HTML 이미지가 안 열림 | report.html과 날짜 아래 시간대별 PNG 폴더를 함께 보관했는지 확인 |
 | 설정 오류 | `--check-config` 실행. JSON 형식, 중복/빈 시간대, 시간 형식, 양수 시간 제한을 확인 |
 | 로그인 완료 확인 실패 | 로그인 화면의 실제 오류와 접속 상태 확인. JSESSIONID 쿠키만으로 로그인 성공을 판단하지 않음 |
 | 창고 또는 예약 정보 불일치 | 청북2층·일반품목·대상 시간·사이트 예약일을 확인. 다른 선택값으로 자동 진행하지 않음 |

@@ -212,18 +212,22 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(paths[0].exists())
             self.assertEqual(paths[0].parent, second.parent)
             await retry.capture_failure_screenshot(self.page, RuntimeError('common failure'))
+            await retry.capture_failure_screenshot(self.page, RuntimeError('later failure'), hour=13)
         finally:
             flush_logger_to_disk(logger)
-        for hour, path in logger.tab_log_paths.items():
-            log = Path(path)
-            report = Path(generate_html_log(path)).read_text()
-            self.assertIn(f'src="{paths[hour - 13].name}"', report)
-            self.assertEqual(log.parent.name, str(hour))
-            self.assertEqual(log.parent.parent.parent, root)
+        report = Path(generate_html_log(logger.log_path, logger.report_path)).read_text()
+        for hour in (13, 14, 15):
+            self.assertIn(f'src="{hour}/{paths[hour - 13].name}"', report)
             self.assertIn('common failure', report)
-            self.assertEqual(len(list(log.parent.glob('*failure.png'))), 1)
+            self.assertEqual(len(list((Path(logger.run_dir) / str(hour)).glob('*failure.png'))),
+                             2 if hour == 13 else 1)
         self.assertEqual({p.suffix for p in root.rglob('*') if p.is_file()}, {'.png', '.log', '.html'})
-        self.assertEqual(len(list(root.glob('*/*'))), 3)
+        self.assertEqual(len(list(root.glob('*/*'))), 5)
+        await self.page.set_content(report)
+        await self.page.select_option('#hourFilter', '13')
+        visible = '\n'.join(await self.page.locator('#logTable tbody tr:visible').all_inner_texts())
+        self.assertIn('[13시 탭]', visible)
+        self.assertNotIn('[14시 탭]', visible)
 
     async def reserve_and_check_notice_capture(self, expected_text):
         self.automation.config['capture_pre_save_screenshots'] = True
@@ -658,6 +662,27 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         await self.page.locator('#list tr').evaluate('el => el.remove()')
         await self.assert_stops_before_save('청북2층 일반품목 예약 행이 없습니다')
 
+    async def test_missing_button_is_not_reported_as_missing_checkbox(self):
+        await self.page.locator('#openMain').evaluate('el => el.remove()')
+        with self.assertLogs('popup-test', level='INFO') as logs:
+            await self.assert_stops_before_save('대상 시간대 예약창 버튼이 없습니다')
+        self.assertIn('체크박스=1, 활성=True, 예약창 버튼=0', '\n'.join(logs.output))
+
+    async def test_button_that_appears_after_checkbox_can_open_reservation(self):
+        await self.page.evaluate("""() => {
+            const button = document.getElementById('openMain');
+            button.style.display = 'none';
+            document.querySelector('#list input[type="checkbox"]').addEventListener('change', () => {
+                setTimeout(() => { button.style.display = ''; }, 50);
+            });
+        }""")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+
+    async def test_missing_checkbox_is_reported_as_missing_checkbox(self):
+        await self.page.locator('#list input[type="checkbox"]').evaluate('el => el.remove()')
+        await self.assert_stops_before_save('대상 시간대 체크박스가 없습니다')
+
     async def test_small_product_row_is_ignored_for_slot_selection(self):
         await self.page.evaluate("""() => {
             const general = document.querySelector('#list tr[id="1"]');
@@ -730,9 +755,20 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         timing = '\n'.join(logs.output)
         self.assertIn('[TIMING] 예약 목록 AJAX 시작', timing)
         self.assertIn('[TIMING] 예약 목록 응답 수신', timing)
-        self.assertIn('[TIMING] 체크박스 화면 반영', timing)
-        self.assertIn('[NETWORK] 요청 POST /selectInreservationListNew.do (headful)', timing)
+        self.assertIn('[TIMING] 예약 목록 행 화면 반영', timing)
+        self.assertIn('[NETWORK] 요청 POST /selectInreservationListNew.do (headful; 요청 #', timing)
         self.assertIn('[NETWORK] 응답 HTTP 200 /selectInreservationListNew.do', timing)
+        self.assertEqual(self.automation.network_state[self.page]['/selectInreservationListNew.do']['status'], 200)
+        self.assertRegex(timing, r'응답 HTTP 200 /selectInreservationListNew.do .*\d+ms')
+
+    async def test_network_monitor_records_other_reservation_request_without_query(self):
+        self.automation.monitor_network(self.page, 13)
+        with self.assertLogs('popup-test', level='INFO') as logs:
+            await self.page.evaluate("fetch('/inreservationReg/selectTimeAuth.do?secret=example', {method:'POST'}).catch(() => {})")
+        events = '\n'.join(logs.output)
+        self.assertIn('[NETWORK] 요청 POST /inreservationReg/selectTimeAuth.do', events)
+        self.assertIn('[NETWORK] 요청 실패 POST /inreservationReg/selectTimeAuth.do', events)
+        self.assertNotIn('secret=example', events)
 
     async def test_failed_list_request_records_reason_and_stops_waiting(self):
         self.query_abort = True

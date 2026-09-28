@@ -115,16 +115,14 @@ def main():
             result = by_hour.get(hour, dict(hour=hour, status='SKIPPED' if status == 'SKIPPED' else 'FAILED',
                                            detail='공통 실행 로그 확인 필요'))
             logger.info(f"[{hour}시 탭] [RESULT] {json.dumps(result, ensure_ascii=False)}")
-            report_path = os.path.splitext(logger.tab_log_paths[hour])[0] + ".html"
-            logger.info(f"[{hour}시 탭] 보고서: {report_path}")
+        logger.info(f"통합 보고서: {logger.report_path}")
         logger.info(f"[COMPLETE] {status} / 종료 코드 {exit_code} / 소요 {(end-start).total_seconds():.2f}초")
         flush_logger_to_disk(logger)
-        for log_path in logger.tab_log_paths.values():
-            try:
-                generate_html_log(log_path)
-            except OSError as error:
-                print(f"HTML 보고서 생성 실패: {error}", file=sys.stderr)
-                exit_code = 1
+        try:
+            generate_html_log(logger.log_path, logger.report_path)
+        except OSError as error:
+            print(f"HTML 보고서 생성 실패: {error}", file=sys.stderr)
+            exit_code = 1
     return exit_code
 
 

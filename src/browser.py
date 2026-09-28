@@ -33,6 +33,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         self.slot_attempts = {}
         self.slot_write_attempts = {}
         self.slot_timing_started = {}
+        self.image_counts = {}
         self.site_timeout_ms = config.get('site_timeout_seconds', 60) * 1000
         self.save_timeout_seconds = config.get('save_timeout_seconds', 60)
         self.server_offset_seconds = 0.0  # 서버 시간 - 로컬 시간 (초 단위 오차)
@@ -49,6 +50,10 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         os.makedirs(path, exist_ok=True)
         return path
 
+    def next_image_index(self, hour: int) -> int:
+        self.image_counts[hour] = self.image_counts.get(hour, 0) + 1
+        return self.image_counts[hour]
+
     async def capture_failure_screenshot(self, page, error: Exception, step_name: str = "", hour: int = None) -> str:
         """실패 화면을 해당 시간대 폴더에 저장한다. 공통 실패는 각 시간대에 남긴다."""
         if hour is None:
@@ -64,7 +69,8 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         if page and not page.is_closed():
             try:
                 screenshot_path = os.path.join(
-                    self.get_tab_output_dir(hour), f"{self.artifact_prefix(hour)}_{hour:02d}_failure.png")
+                    self.get_tab_output_dir(hour),
+                    f"{self.artifact_prefix(hour)}_{hour:02d}_{self.next_image_index(hour):03d}_failure.png")
                 await page.screenshot(path=screenshot_path, full_page=False)
                 self.has_captured_screenshot = True
                 self.logger.error(f"★ {tab_label}[FAIL] 실패 지점 스크린샷 저장 완료: {screenshot_path}")
@@ -105,7 +111,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
 
         path = os.path.join(
             self.get_tab_output_dir(hour),
-            f"{self.artifact_prefix(hour)}_{hour:02d}_{stage:02d}_{name}.png",
+            f"{self.artifact_prefix(hour)}_{hour:02d}_{self.next_image_index(hour):03d}_{stage:02d}_{name}.png",
         )
         try:
             await page.screenshot(path=path, full_page=False)
@@ -128,52 +134,73 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         return 2 + 3 * hours.index(hour) / (len(hours) - 1)
 
     def monitor_network(self, page, hour: int):
-        """예약 조회 요청의 상태를 headless/headful에서 같은 형식으로 기록한다."""
+        """예약 API의 경로, 상태, 소요 시간을 탭별로 기록한다. 본문과 쿼리는 남기지 않는다."""
         if page in self.network_pages:
             return
         self.network_pages.add(page)
         self.network_state[page] = {}
         mode = 'headless' if self.config.get('headless', False) else 'headful'
+        pending = {}
+        request_number = 0
 
         def relevant(url):
             path = urlsplit(url).path
-            return path.endswith(('selectInreservationListNew.do',
-                                   'selectInReservationItemListNew.do',
-                                   'selectMMIF0015List.do'))
+            return path.startswith('/inreservationReg/') or path.endswith((
+                'selectInreservationListNew.do',
+                'selectInReservationItemListNew.do',
+                'selectMMIF0015List.do'))
+
+        def key_for(path):
+            return '/' + path.rsplit('/', 1)[-1]
 
         def on_request(request):
+            nonlocal request_number
             if request.resource_type not in ('xhr', 'fetch') or not relevant(request.url):
                 return
             path = urlsplit(request.url).path
-            self.network_state[page][path] = {'failure': '', 'mode': mode}
-            self.logger.info(f"[{hour}시 탭] [NETWORK] 요청 {request.method} {path} ({mode})")
+            request_number += 1
+            pending[request] = (request_number, time.monotonic())
+            self.network_state[page][key_for(path)] = {
+                'failure': '', 'status': '대기 중', 'mode': mode, 'request_id': request_number}
+            self.logger.info(
+                f"[{hour}시 탭] [NETWORK] 요청 {request.method} {path} "
+                f"({mode}; 요청 #{request_number})")
 
         def on_response(response):
             if response.request.resource_type not in ('xhr', 'fetch') or not relevant(response.url):
                 return
             path = urlsplit(response.url).path
+            request_id, started = pending.get(response.request, (None, None))
+            elapsed = f", {1000 * (time.monotonic() - started):.0f}ms" if started is not None else ''
             headers = response.headers
             safe_headers = ', '.join(
                 f'{name}={headers[name]}' for name in ('date', 'retry-after', 'content-type', 'server')
                 if headers.get(name)) or '기록할 응답 헤더 없음'
-            state = self.network_state[page].setdefault(path, {})
-            state.update(status=response.status, headers=safe_headers, mode=mode)
+            state = self.network_state[page].setdefault(key_for(path), {})
+            if state.get('request_id') == request_id:
+                state.update(status=response.status, headers=safe_headers, mode=mode)
             self.logger.info(
                 f"[{hour}시 탭] [NETWORK] 응답 HTTP {response.status} {path} "
-                f"({mode}; {safe_headers})")
+                f"({mode}; 요청 #{request_id}{elapsed}; {safe_headers})")
 
         def on_failed(request):
             if request.resource_type not in ('xhr', 'fetch') or not relevant(request.url):
                 return
             path = urlsplit(request.url).path
+            request_id, started = pending.pop(request, (None, None))
+            elapsed = f", {1000 * (time.monotonic() - started):.0f}ms" if started is not None else ''
             failure = request.failure or '원인 정보 없음'
-            self.network_state[page].setdefault(path, {})['failure'] = failure
+            state = self.network_state[page].setdefault(key_for(path), {})
+            if state.get('request_id') == request_id:
+                state['failure'] = failure
             self.logger.error(
-                f"[{hour}시 탭] [NETWORK] 요청 실패 {request.method} {path} ({mode}): {failure}")
+                f"[{hour}시 탭] [NETWORK] 요청 실패 {request.method} {path} "
+                f"({mode}; 요청 #{request_id}{elapsed}): {failure}")
 
         page.on('request', on_request)
         page.on('response', on_response)
         page.on('requestfailed', on_failed)
+        page.on('requestfinished', lambda request: pending.pop(request, None))
 
     async def launch_browser(self, playwright_obj):
         """Playwright 브라우저 고속 실행 (Chromium 경량화 가속 플래그 적용)"""
@@ -388,7 +415,7 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                     f"[{hour}시 탭] [WAITING] 예약 목록 화면 반영 지연: 조회중 상태가 끝날 때까지 계속 대기")
                 next_log += 10
             await asyncio.sleep(.25)
-        self.record_slot_timing(hour, '체크박스 화면 반영')
+        self.record_slot_timing(hour, '예약 목록 행 화면 반영')
         return data
 
     async def wait_until_target_time(self, page):
@@ -808,12 +835,17 @@ class CosmaxAutomation(ReservationRecoveryMixin):
             raise RuntimeError(f"[{tab_label}] 예약 행의 창고가 청북2층이 아닙니다.")
         checkbox = row.locator(f'td[aria-describedby="list_checkYn{col_arg}"] input[type="checkbox"]')
         open_button = row.locator(f'td[aria-describedby="list_cobut{col_arg}"] a')
-        async def slot_available():
-            return (await checkbox.count() and await checkbox.is_enabled()
-                    and await open_button.count() and await open_button.is_visible())
-        if not await slot_available():
+        checkbox_count = await checkbox.count()
+        button_count = await open_button.count()
+        checkbox_enabled = bool(checkbox_count and await checkbox.is_enabled())
+        button_visible = bool(button_count and await open_button.is_visible())
+        self.logger.info(
+            f"[{tab_label}] [SLOT] {day} {hour}시 일반품목: "
+            f"체크박스={checkbox_count}, 활성={checkbox_enabled}, "
+            f"예약창 버튼={button_count}, 표시={button_visible}")
+        if not (checkbox_count and checkbox_enabled):
             await self.check_site_notice(page, hour, '시간대 활성화 대기')
-            if not await checkbox.count() or not await open_button.count():
+            if not checkbox_count:
                 raise RuntimeError(f"[{tab_label}] 대상 시간대 체크박스가 없습니다. (마감 또는 미오픈)")
             raise RuntimeError(f"[{tab_label}] 대상 시간대 체크박스가 활성화되지 않았습니다. (마감 또는 미오픈)")
         seq = (await row.locator(f'[aria-describedby="list_seq{col_arg}"]').text_content()).strip()
@@ -821,6 +853,17 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         await checkbox.check(timeout=self.site_timeout_ms)
         await self.save_stage_screenshot(page, hour, 1, "slot_selected")
         await self.check_site_notice(page, hour, '예약 창 열기')
+        try:
+            await open_button.wait_for(state='visible', timeout=self.site_timeout_ms)
+        except PlaywrightError as error:
+            await self.check_site_notice(page, hour, '예약 창 열기')
+            button_count = await open_button.count()
+            self.logger.warning(
+                f"[{tab_label}] [SLOT] 체크박스 선택 후 예약창 버튼="
+                f"{button_count}, 표시={bool(button_count and await open_button.is_visible())}")
+            if not button_count:
+                raise RuntimeError(f"[{tab_label}] 대상 시간대 예약창 버튼이 없습니다. (마감 또는 미오픈)") from error
+            raise RuntimeError(f"[{tab_label}] 대상 시간대 예약창 버튼이 표시되지 않았습니다. (마감 또는 미오픈)") from error
         await open_button.click(timeout=self.site_timeout_ms)
         await self.check_site_notice(page, hour, '예약 창 열기')
         await page.locator('#ly_popInreservationMain').wait_for(state='visible', timeout=self.site_timeout_ms)
@@ -1144,7 +1187,9 @@ async def execute_automation(config: dict, logger: logging.Logger):
                         await automation.capture_failure_screenshot(page, error, phase, hour)
                         detail = str(error)
                         unavailable = ('대상 시간대 체크박스가 없습니다.' in detail
-                                       or '대상 시간대 체크박스가 활성화되지 않았습니다.' in detail)
+                                       or '대상 시간대 체크박스가 활성화되지 않았습니다.' in detail
+                                       or '대상 시간대 예약창 버튼이 없습니다.' in detail
+                                       or '대상 시간대 예약창 버튼이 표시되지 않았습니다.' in detail)
                         blank_notice = '내용 없는 알림' in detail
                         staggered_recovery = (blank_notice
                                               or '예약 목록 조회 요청 실패' in detail)
