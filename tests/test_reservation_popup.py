@@ -42,6 +42,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
 <input id="ly_popInreservationMain_paletteTotal"><input id="ly_popInreservationMain_carTotal">
 <button id="ly_popInreservationMain_btnSave">저장</button></div>
 <div id="ly_popInreservationSelf">
+<button class="pop_btnclose" id="selfClose">닫기</button>
 <button id="ly_popInreservationSelf_btnSelect">조회</button>
 <div id="load_ly_popInreservationSelf_itemList">조회중...</div>
 <table id="ly_popInreservationSelf_itemList"></table>
@@ -66,6 +67,9 @@ document.getElementById('ly_popInreservationMain_btnSelect').onclick = async () 
 document.getElementById('ly_popInreservationMain_btnSelfAdd').onclick = e => {
  record(e,'open'); if (!e.isTrusted) return;
  setTimeout(() => { sub.style.display='block'; grid.innerHTML=''; }, 80);
+};
+document.getElementById('selfClose').onclick = e => {
+ record(e,'close'); sub.style.display='none';
 };
 document.getElementById('ly_popInreservationSelf_btnSelect').onclick = async e => {
  record(e,'query'); if (!e.isTrusted) return;
@@ -116,6 +120,7 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
         self.page = await self.browser.new_page()
         self.data = {"returnCode": "SUCCESS", "rows": [{"allowed": "O"}] * 3}
         self.status = 200
+        self.self_query_statuses = []
         self.raw_body = None
         self.save_status = 200
         self.save_data = {"returnCode":"SUCCESS"}
@@ -145,7 +150,8 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await route.fulfill(content_type="text/html", body=PAGE)
         elif path == "/selectMMIF0015List.do":
             await asyncio.sleep(0.05)
-            await route.fulfill(status=self.status, content_type="application/json",
+            status = self.self_query_statuses.pop(0) if self.self_query_statuses else self.status
+            await route.fulfill(status=status, content_type="application/json",
                                 body=self.raw_body if self.raw_body is not None else json.dumps(self.data))
         elif path == "/saveInReservationItemListNew.do":
             await asyncio.sleep(self.save_delay)
@@ -336,6 +342,24 @@ class ReservationPopupTest(unittest.IsolatedAsyncioTestCase):
             await self.assert_stops_before_save('자급자재 조회 화면 반영 지연')
         self.assertTrue(any('/selectMMIF0015List.do' in message for message in logs.output))
         self.assertEqual(self.requests.count('/selectMMIF0015List.do'), 2)
+
+    async def test_http_error_closes_notice_and_self_modal_before_reopening(self):
+        self.self_query_statuses = [502, 200]
+        await self.page.evaluate("""() => {
+            const button = document.getElementById('ly_popInreservationSelf_btnSelect');
+            const query = button.onclick;
+            let first = true;
+            button.onclick = event => {
+                if (first) { first = false; setTimeout(() => notice('담당자에게 문의 부탁드립니다.'), 20); }
+                return query(event);
+            };
+        }""")
+        result = await self.automation.reserve_single_slot(self.page, 13)
+        self.assertEqual(result['status'], 'CONFIRMED')
+        self.assertEqual(self.requests.count('/selectMMIF0015List.do'), 2)
+        self.assertFalse(await self.page.locator('#lyNoti').is_visible())
+        self.assertEqual([event['name'] for event in await self.page.evaluate('window.events')],
+                         ['open', 'query', 'close', 'open', 'query', 'add', 'save'])
 
     async def test_invalid_json_stops_before_save(self):
         self.raw_body = '<html>error</html>'

@@ -73,7 +73,7 @@ run_automation.bat --headful --record-video
 
 메뉴 4·5번에서도 녹화하려면 `config.json`에 `"record_video": true`를 설정합니다. **`headless=false`일 때만 녹화하며, `headless=true`에서는 옵션이 켜져 있어도 녹화하지 않습니다.** 메뉴 6번의 자동 실행도 headless이므로 녹화하지 않습니다. `--no-record-video`로 이번 실행만 끌 수 있습니다.
 
-영상은 각 탭을 연 시점부터 브라우저 종료까지(로그인·목표 시각 대기 포함) 무음 WebM으로 기록합니다. 종료 후 `log/날짜/13/video_실행시각_attempt1_13.webm`처럼 시간대별 폴더에 저장하며, 날짜 폴더의 `report.html`에서 재생하거나 내려받을 수 있습니다. [Playwright 영상 녹화](https://playwright.dev/python/docs/videos)를 사용하므로 별도 패키지는 필요하지 않습니다.
+영상은 각 탭을 연 시점부터 브라우저 종료까지(로그인·목표 시각 대기 포함) 무음으로 기록합니다. 종료 후 MP4로 변환하여 `log/날짜/13/video_실행시각_attempt1_13.mp4`처럼 시간대별 폴더에 저장하며, 날짜 폴더의 `report.html`에서 재생하거나 내려받을 수 있습니다. 변환에 실패하면 같은 폴더에 원본 WebM을 보존합니다. 변환 도구는 `requirements.txt`의 `imageio-ffmpeg`가 설치합니다.
 
 영상에는 사이트 화면이 담기며, 브라우저 주소 표시줄·탭·기본 `alert/confirm` 팝업은 포함되지 않습니다. 기본 팝업은 기존 Windows PNG 캡처와 문구 로그로 확인합니다. 사이트 내부 안내창은 영상에 포함됩니다. 브라우저를 정상 종료해야 파일이 완성되며, 강제 종료 시 불완전한 영상이나 임시 이름의 파일이 남을 수 있습니다.
 
@@ -108,7 +108,7 @@ log/
     report.html                    # 시간대·실행별 필터
     13/
       reservation_YYYYMMDD_HHMMSS_ffffff_attempt1_13_001_03_....png
-      video_YYYYMMDD_HHMMSS_ffffff_attempt1_13.webm  # 녹화 시에만 생성
+      video_YYYYMMDD_HHMMSS_ffffff_attempt1_13.mp4   # 녹화 시에만 생성
     14/                           # 같은 형식
     15/                           # 같은 형식
 ```

@@ -156,7 +156,7 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
         # 같은 시간대 폴더의 이미지/영상 경로 (Windows 경로와 공백 지원).
         img_path = None
         video_path = None
-        media_match = re.search(r"(?:[A-Za-z]:[\\/]|/)[^\r\n]*?\.(png|webm)", message)
+        media_match = re.search(r"(?:[A-Za-z]:[\\/]|/)[^\r\n]*?\.(png|webm|mp4)", message)
         if media_match:
             media_name = media_match.group(0).replace("\\", "/").rsplit("/", 1)[-1]
             media_dir = os.path.dirname(os.path.abspath(log_file_path))
@@ -165,7 +165,7 @@ def generate_html_log(log_file_path: str, html_file_path: str = None) -> str:
             media_path = os.path.relpath(
                 os.path.join(media_dir, media_name),
                 os.path.dirname(os.path.abspath(html_file_path))).replace(os.sep, '/')
-            if media_match.group(1) == 'webm':
+            if media_match.group(1) in ('webm', 'mp4'):
                 video_path = media_path
             else:
                 img_path = media_path

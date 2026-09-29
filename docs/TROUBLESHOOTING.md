@@ -90,6 +90,6 @@ macOS/Linux에서는 위 Python 경로를 `venv/bin/python`으로 바꿉니다.
 
 - 녹화 기본값은 꺼짐입니다. `--headful --record-video` 또는 `headless=false`, `record_video=true` 설정이 필요합니다. `--no-record-video`가 있으면 녹화하지 않습니다.
 - `headless=true`에서는 요청 여부와 관계없이 녹화하지 않습니다. 메뉴 6번으로 등록한 스케줄러가 여기에 해당합니다.
-- 실행이 끝난 뒤 `log/날짜/시간대/video_*.webm`과 `동영상 저장` 로그를 확인합니다. 종료 전에는 임시 파일명이며, 강제 종료하면 완성되지 않을 수 있습니다. `동영상 저장 실패` 또는 `녹화 마무리 실패` 경고도 확인하세요.
+- 실행이 끝난 뒤 `log/날짜/시간대/video_*.mp4`와 `동영상 저장` 로그를 확인합니다. 종료 전에는 임시 파일명이며, 강제 종료하면 완성되지 않을 수 있습니다. `MP4 변환 실패`가 나오면 같은 폴더의 `.webm`을 확인하세요. `동영상 저장 실패` 또는 `녹화 마무리 실패` 경고도 확인하세요.
 - 브라우저 기본 `alert/confirm`은 사이트 화면 영상에 포함되지 않습니다. Windows 화면 표시 모드의 `*_browser_dialog_*.png`와 팝업 문구 로그를 확인합니다.
 - FFmpeg 실행 파일을 찾을 수 없다는 오류라면 메뉴 1번 또는 `venv\Scripts\python.exe -m playwright install chromium`으로 Playwright 브라우저 구성 요소를 복구합니다.

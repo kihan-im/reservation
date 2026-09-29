@@ -4,6 +4,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from src.browser import CosmaxAutomation, execute_automation
@@ -45,27 +46,45 @@ class VideoRecordingTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(headless=headless, enabled=enabled), tempfile.TemporaryDirectory() as folder:
                 outcomes = await self.run_local(folder, headless=headless, record_video=enabled)
                 self.assertEqual(len(outcomes), 3)
-                videos = list(Path(folder).rglob('*.webm'))
+                videos = list(Path(folder).rglob('*.mp4'))
                 if enabled and not headless:
                     self.assertEqual(len(videos), 3)
                     self.assertEqual({p.parent.name for p in videos}, {'13','14','15'})
                     for video in videos:
                         self.assertTrue(video.name.startswith('video_'))
-                        self.assertTrue(video.name.endswith(f'_attempt1_{video.parent.name}.webm'))
+                        self.assertTrue(video.name.endswith(f'_attempt1_{video.parent.name}.mp4'))
                         self.assertGreater(video.stat().st_size, 100)
-                        self.assertEqual(video.read_bytes()[:4], b'\x1a\x45\xdf\xa3')
+                        self.assertEqual(video.read_bytes()[4:8], b'ftyp')
+                    self.assertEqual(list(Path(folder).rglob('*.webm')), [])
                 else:
                     self.assertEqual(videos, [])
+                    self.assertEqual(list(Path(folder).rglob('*.webm')), [])
 
     async def test_login_failure_still_finalizes_video(self):
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(RuntimeError, 'local login failed'):
                 await self.run_local(folder, headless=False, record_video=True, login_error=True)
-            videos = list(Path(folder).rglob('*.webm'))
+            videos = list(Path(folder).rglob('*.mp4'))
             self.assertEqual(len(videos), 1)
             self.assertEqual(videos[0].parent.name, '13')
             self.assertTrue(videos[0].name.startswith('video_'))
             self.assertGreater(videos[0].stat().st_size, 100)
+            self.assertEqual(videos[0].read_bytes()[4:8], b'ftyp')
+
+    async def test_conversion_failure_preserves_webm(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'recording.webm'
+            source.write_bytes(b'original recording')
+            bot = object.__new__(CosmaxAutomation)
+            bot.output_dir = folder
+            bot.run_id = 'local_test'
+            bot.config = {'attempt': 1}
+            bot.logger = logging.getLogger('local-video')
+            page = SimpleNamespace(video=SimpleNamespace(path=AsyncMock(return_value=str(source))))
+            with patch('src.browser.subprocess.run', side_effect=RuntimeError('encoder failed')):
+                await bot.save_recorded_videos([(13, page)])
+            self.assertEqual(len(list(Path(folder).rglob('*.webm'))), 1)
+            self.assertEqual(list(Path(folder).rglob('*.mp4')), [])
 
 
 class VideoOptionTest(unittest.TestCase):

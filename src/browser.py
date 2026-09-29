@@ -8,12 +8,14 @@ import asyncio
 import logging
 import time
 import re
+import subprocess
 from statistics import median
 from pathlib import Path
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit, parse_qs
 from playwright.async_api import Error as PlaywrightError
+from imageio_ffmpeg import get_ffmpeg_exe
 from src.reservation_state import ReservationState, now_kst
 from src.recovery import ReservationRecoveryMixin, ResponseError, retry_delay
 
@@ -88,16 +90,30 @@ class CosmaxAutomation(ReservationRecoveryMixin):
         return path
 
     async def save_recorded_videos(self, tabs):
-        """컨텍스트 종료로 녹화가 끝난 뒤 시간대별 파일명으로 옮긴다."""
+        """녹화가 끝난 WebM을 시간대별 MP4로 변환한다."""
         for hour, page in tabs:
             if page.video is None:
                 continue
             try:
                 source = Path(await page.video.path())
-                target = Path(self.get_tab_output_dir(hour)) / (
+                webm = Path(self.get_tab_output_dir(hour)) / (
                     f"video_{self.run_id}_attempt{self.config.get('attempt', 1)}_{hour:02d}.webm")
-                source.replace(target)
-                self.logger.info(f"🎥 [{hour}시 탭] 동영상 저장: {target}")
+                source.replace(webm)
+                mp4 = webm.with_suffix('.mp4')
+                partial = mp4.with_name(f'.{mp4.stem}.partial.mp4')
+                try:
+                    subprocess.run([
+                        get_ffmpeg_exe(), '-hide_banner', '-loglevel', 'error', '-y',
+                        '-i', str(webm), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                        '-movflags', '+faststart', '-an', str(partial),
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                    partial.replace(mp4)
+                    webm.unlink()
+                    self.logger.info(f"🎥 [{hour}시 탭] 동영상 저장: {mp4}")
+                except Exception as error:
+                    self.logger.warning(f"[{hour}시 탭] MP4 변환 실패, WebM 보존: {webm} ({error})")
+                finally:
+                    partial.unlink(missing_ok=True)
             except Exception as error:
                 self.logger.warning(f"[{hour}시 탭] 동영상 저장 실패: {error}")
 
@@ -578,11 +594,12 @@ class CosmaxAutomation(ReservationRecoveryMixin):
             await self.click_reservation_button(
                 page, hour, "#ly_popInreservationMain_btnSelfAdd", step
             )
-            await page.locator("#ly_popInreservationSelf").wait_for(state="visible", timeout=self.site_timeout_ms)
+            self_modal = page.locator("#ly_popInreservationSelf")
+            await self_modal.wait_for(state="visible", timeout=self.site_timeout_ms)
             await self.check_site_notice(page, hour, step)
 
             step = "자급자재 조회"
-            # 진행 중인 조회는 기다리고, 실패한 경우만 현재 모달에서 한 번 다시 조회한다.
+            # 조회 실패 시 알림과 자급자재 창을 닫고 한 번 다시 연다.
             for grid_attempt in range(2):
                 try:
                     response = await self.query_response(
@@ -629,7 +646,15 @@ class CosmaxAutomation(ReservationRecoveryMixin):
                             f"[{hour}시 탭] 자급자재 조회 화면 반영 지연: 동일 탭 조회 2회 후 체크박스가 나타나지 않았습니다.{alert}"
                         ) from error
                     await self.dismiss_retry_notice(page, hour)
-                    self.logger.warning(f"[{hour}시 탭] [RETRY] 자급자재 조회 화면 반영 지연: 현재 탭에서 즉시 재조회 (2/2)")
+                    if await page.locator("#lyNoti").is_visible():
+                        raise RuntimeError(f"[{hour}시 탭] 자급자재 재시도 전 사이트 알림을 닫지 못했습니다.") from error
+                    if await self_modal.is_visible():
+                        await self_modal.locator(".pop_btnclose:visible").click(timeout=self.site_timeout_ms)
+                    await self_modal.wait_for(state="hidden", timeout=self.site_timeout_ms)
+                    await self.click_reservation_button(
+                        page, hour, "#ly_popInreservationMain_btnSelfAdd", "자급자재 창 다시 열기")
+                    await self_modal.wait_for(state="visible", timeout=self.site_timeout_ms)
+                    self.logger.warning(f"[{hour}시 탭] [RETRY] 자급자재 조회 실패: 알림·자급자재 창을 닫고 다시 열어 조회 (2/2)")
             await self.save_stage_screenshot(page, hour, 4, "self_materials_loaded")
 
             step = "자급자재 품목 선택"
